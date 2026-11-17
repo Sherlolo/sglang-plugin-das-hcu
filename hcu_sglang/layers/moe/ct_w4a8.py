@@ -37,8 +37,8 @@ def forward_contiguous(self, dispatch_output):
     ids = dispatch_output.topk_ids
     weights = dispatch_output.topk_weights
     counts = dispatch_output.num_recv_tokens_per_expert
-    if self.moe_runner_config.activation != "silu":
-        raise ValueError("HCU W4A8 HIPC currently supports only SiLU")
+    if self.moe_runner_config.activation not in ("silu", "situ"):
+        raise ValueError("HCU W4A8 HIPC supports SiLU and SiTU only")
     if x.dtype != torch.int8 or x_scale is None or x_scale.dtype != torch.float32:
         raise RuntimeError(
             "HCU W4A8 reference normal requires INT8 dispatch with FP32 scales"
@@ -80,7 +80,15 @@ def forward_contiguous(self, dispatch_output):
         m_indices,
     )
     del a1, a1_scale
-    if self.moe_runner_config.swiglu_limit is None:
+    if self.moe_runner_config.activation == "situ":
+        from lightop import fuse_situ_mul_quant_contiguous
+
+        a2, a2_scale = fuse_situ_mul_quant_contiguous(
+            gate_up,
+            self.moe_runner_config.gemm1_alpha,
+            self.moe_runner_config.gemm1_clamp_limit,
+        )
+    elif self.moe_runner_config.swiglu_limit is None:
         a2, a2_scale = fuse_silu_mul_quant(gate_up)
     else:
         a2, a2_scale = fuse_silu_mul_clamp_quant(

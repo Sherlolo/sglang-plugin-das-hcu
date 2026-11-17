@@ -2867,3 +2867,26 @@ both before and after this change, with identical failure/error identifiers;
 216 current tests versus210 baseline tests. Six diagnostic tests require
 Torch and were skipped in the local environment. Fresh GPU/graph/service
 verification and browser visual inspection were not performed for this commit.
+
+
+## Kimi K3.1 32-card prefill EP delivery (2026-11-17)
+
+This commit archives the runtime changes measured in the 1116 prefill report.
+TP8 / CP8 / EP8 / PP4 uses DeepGEMM W4A8 contiguous HIPC, SiTU fused
+quantization, native expert checkpoint scales and NCCL all-gather/reduce-scatter.
+Enable HCU_KIMI31_DEEPEP=1, HCU_KIMI31_EP_TRANSPORT=nccl and
+SGLANG_USE_W4A8_CONTIGUOUS_HIPC=1. Adapter owns platform compatibility;
+this plugin owns model quantization selection and EP dispatch. The companion
+adapter configs/kimi31-prefill/launch_32gpu_ep.sh freezes the reported recipe.
+
+Historical validation: 32-card 131072-input/1-output cache-off C1 response
+12.043 seconds, 10883.38 input tokens/s, after one warmup. Timing includes
+non-streaming HTTP overhead and is not strict TTFT. The report records
+short/long request checks and real NCCL/DeepGEMM operator checks; these are
+historical evidence, not checks re-run for this commit. Native DeepEP Buffer
+failed; NCCL transport was used. Physical GPUs have about 144 GiB and the
+reported recipe uses static=0.90; this is not a physical 96-GiB result.
+
+Scope excludes later decode/PP-loader changes and the unqualified LightOp
+router candidate. Disabling HCU_KIMI31_DEEPEP retains the prior Day-0 hooks.
+No new GPU service is started by this archival commit task.

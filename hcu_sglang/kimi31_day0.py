@@ -65,6 +65,11 @@ def register_hooks():
     registry.register_hooks()
     registry.install_quantization_method()
 
+    import os
+    if os.environ.get("HCU_KIMI31_DEEPEP") == "1":
+        from hcu_sglang.kimi31_ep_moe import register_hooks as register_ep
+        register_ep()
+
     from hcu_sglang.kimi31_diagnostics import register_hooks as register_diagnostics
     register_diagnostics()
 
