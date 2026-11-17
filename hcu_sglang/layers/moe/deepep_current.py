@@ -707,6 +707,7 @@ class _DeepEPDispatcherImplBase:
         hidden_size: int,
         params_dtype: torch.dtype,
         deepep_mode: DeepEPMode,
+        runner_backend=None,
     ):
         if not use_deepep:
             raise ImportError(
@@ -727,6 +728,7 @@ class _DeepEPDispatcherImplBase:
         self.hidden_size = hidden_size
         self.params_dtype = params_dtype
         self.deepep_mode = deepep_mode
+        self.runner_backend = runner_backend or get_moe_runner_backend()
 
         self.params_bytes = 2
         # A large value will lead to large memory occupation, thus users should change it accordingly
@@ -1511,12 +1513,17 @@ class DeepEPDispatcher(BaseDispatcher):
         deepep_mode: DeepEPMode = DeepEPMode.AUTO,
         async_finish: bool = False,
         return_recv_hook: bool = False,
+        runner_backend=None,
     ):
         super().__init__()
 
+        if runner_backend is not None and runner_backend != get_moe_runner_backend():
+            raise ValueError("HCU DeepEP requires the active MoE runner backend")
+        self.runner_backend = runner_backend or get_moe_runner_backend()
         self.deepep_mode = deepep_mode
 
         common_kwargs = dict(
+            runner_backend=self.runner_backend,
             group=group,
             router_topk=router_topk,
             permute_fusion=permute_fusion,
