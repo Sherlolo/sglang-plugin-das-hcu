@@ -12,6 +12,9 @@ def _flashmla_operation(name):
     accepts_kv_format = "kv_format" in signature(operation).parameters
 
     def run(self, **kwargs):
+        if name == "flash_mla_with_kvcache":
+            from hcu_sglang.kimi31_graph_compat import validate_sparse_scheduler
+            validate_sparse_scheduler(kwargs)
         if name == "flash_mla_with_kvcache" and not accepts_kv_format:
             kv_format = kwargs.pop("kv_format", "V32")
             if kv_format != "V32":
@@ -45,6 +48,10 @@ def _warm_blas_before_load(self):
 
 
 def register_hooks():
+    import os
+    os.environ["SGLANG_W4A8_TPMOE_BACKEND"] = "aiter"
+    from hcu_sglang.kimi31_graph_compat import register_hooks as register_graph_compat
+    register_graph_compat()
     HookRegistry.register(
         "sglang.srt.model_executor.model_runner.ModelRunner.load_model",
         _warm_blas_before_load, HookType.BEFORE,

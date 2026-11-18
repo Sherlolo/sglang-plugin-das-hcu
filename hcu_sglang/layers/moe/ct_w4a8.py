@@ -120,8 +120,8 @@ def forward_masked(self, dispatch_output):
     x = dispatch_output.hidden_states
     scale = dispatch_output.hidden_states_scale
     masked_m = dispatch_output.masked_m
-    if self.moe_runner_config.activation != "silu":
-        raise ValueError("HCU W4A8 DeepGEMM currently supports only SiLU")
+    if self.moe_runner_config.activation not in ("silu", "situ"):
+        raise ValueError("HCU W4A8 DeepGEMM supports SiLU and SiTU only")
     if x.dtype != torch.int8 or scale is None or scale.dtype != torch.float32:
         raise RuntimeError(
             "HCU W4A8 DeepGEMM low-latency dispatch requires INT8 "
@@ -171,7 +171,16 @@ def forward_masked(self, dispatch_output):
         expected_m,
     )
     swiglu_limit = self.moe_runner_config.swiglu_limit
-    if swiglu_limit is None:
+    if self.moe_runner_config.activation == "situ":
+        from lightop import fuse_situ_mul_quant_ep
+
+        a2, a2_scale = fuse_situ_mul_quant_ep(
+            gate_up, masked_m,
+            self.moe_runner_config.gemm1_alpha,
+            self.moe_runner_config.gemm1_clamp_limit,
+            expect_m=expected_m,
+        )
+    elif swiglu_limit is None:
         a2, a2_scale = fuse_silu_mul_quant_ep(
             gate_up, tokens_per_expert=masked_m, expect_m=-1
         )
@@ -255,9 +264,10 @@ def _masked(
 ) -> torch.Tensor:
     from deepgemm import m_grouped_w4a8_gemm_nt_masked
 
-    return m_grouped_w4a8_gemm_nt_masked(
+    m_grouped_w4a8_gemm_nt_masked(
         (a0, a1), (b0, b1), d, masked_m, expected_m_per_group
     )
+    return d
 
 
 def _masked_hipc(
@@ -271,9 +281,10 @@ def _masked_hipc(
 ) -> torch.Tensor:
     from deepgemm import m_grouped_w4a8_gemm_nt_masked_hipc
 
-    return m_grouped_w4a8_gemm_nt_masked_hipc(
+    m_grouped_w4a8_gemm_nt_masked_hipc(
         (a0, a1), (b0, b1), d, masked_m, expected_m_per_group
     )
+    return d
 
 
 def _masked_fake(
@@ -297,7 +308,7 @@ def register_ops():
     ):
         if not hasattr(torch.ops.sglang, name):
             direct_register_custom_op(
-                op_name=name, op_func=fn, mutates_args=[], fake_impl=_masked_fake
+                op_name=name, op_func=fn, mutates_args=["d"], fake_impl=_masked_fake
             )
 
 

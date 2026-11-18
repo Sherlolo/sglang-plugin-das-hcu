@@ -666,5 +666,18 @@
   ],
   "official_sha": "baa9befa381511cd4d56f83980951e5a45fffc6d",
   "profile": "fixed official, HCU default registration; not whole-model equivalence",
-  "source_sha": "15c7204b7a3b6edaa222cff80018d8e5f2b2ad0e"
+  "source_sha": "15c7204b7a3b6edaa222cff80018d8e5f2b2ad0e",
+  "optional_profiles": {
+    "kimi31_deepep_full_graph": {
+      "environment": {
+        "HCU_KIMI31_DAY0": "1",
+        "HCU_KIMI31_EP_TRANSPORT": "deepep",
+        "HCU_KIMI31_FULL_GRAPH_COMPAT": "1"
+      },
+      "expected_hook_targets": [
+        "sglang.srt.layers.attention.dsa_backend.DeepseekSparseAttnBackend._compute_flashmla_metadata",
+        "sglang.srt.layers.attention.linear.kernels.kda_triton.TritonKDAKernel.packed_decode"
+      ]
+    }
+  }
 }

@@ -2890,3 +2890,51 @@ reported recipe uses static=0.90; this is not a physical 96-GiB result.
 Scope excludes later decode/PP-loader changes and the unqualified LightOp
 router candidate. Disabling HCU_KIMI31_DEEPEP retains the prior Day-0 hooks.
 No new GPU service is started by this archival commit task.
+
+
+## Kimi K3.1 native DeepEP low-latency and full decode Graph (2026-11-18)
+
+The W4A8 EP method now accepts DeepEP auto/low_latency, uses INT8/FP32
+dispatch and masked DeepGEMM HIPC with SiTU, and records the existing
+combine-input readiness event. Masked custom operators return their output
+Tensor and declare its mutation rather than returning vendor tile metadata.
+The vendor buffer clean API receives the actual top-k when supported.
+TP MoE is selected through SGLANG_W4A8_TPMOE_BACKEND=aiter.
+
+HCU_KIMI31_FULL_GRAPH_COMPAT=1 with HCU_KIMI31_EP_TRANSPORT=deepep opts into
+the FlashMLA scheduler-object metadata contract and the empty-rank KDA
+packed-decode guard. Without explicit opt-in the hooks are not registered.
+Existing tensor metadata and nonempty KDA calls retain their original path.
+This commit does not include the separate NCCL EP graph implementation.
+
+Requires the paired adapter change preserving native DeepEP quant_type calls
+and the signature while retaining upstream use_fp8 call translation, plus
+startup compatibility for current official SGLang. Pairing commit: f8ed197e23a3584485bcfe92e134c7801e4fcc63.
+Official SGLang tested: 8f2e5fe54efabf30a87138c6e6477676412686d4, unchanged.
+Reference: HYGON-AI/sglang-das main da8642a25aa7b1056f5ed5bfccd8cd20aa487877,
+python/sglang/srt/layers/moe/ep_moe/layer.py masked W4A8 SiTU consumer.
+
+Validated on four nodes/four GPUs each with roughly 144-GiB devices:
+TP16/EP16/attention-DP2, context4096, max-running-requests16, per-DP8,
+DeepEP auto, full decode Graph bs8, per-rank dispatch capacity8,
+DEEP_EP_NORMAL_MNVL=1, ROCSHMEM_IPC_MNVL=1, ROCSHMEM_IPC_MNVL_NPES=16.
+All 96 checkpoint shards loaded on every rank; all 16 ranks completed full
+Graph capture; actual decode logs report cuda graph: True. Roughly 7-8 GiB
+remained per rank after capture. Arithmetic, Beijing, Chinese greeting and
+multi-turn 7-2+3=8 chat checks returned correct content and finish_reason=stop
+with thinking disabled. No dataset accuracy or performance claim is made.
+TP-only AITER whole-model execution and 32-GPU configurations are untested.
+
+The opt-in 16-rank GPU probe uses synthetic HIPC weights and real native
+normal/low-latency communication, SiTU/GEMM and changed-input Graph replay;
+only its active-runner selector is stubbed. It does not load the checkpoint.
+Run through torchrun with exactly 16 ranks and HCU_PLUGIN_RUN_GPU_TESTS=1;
+set HCU_LL_INTEGRATED_PROBE=1 and the adapter/plugin environment to include
+the consumer math. It is not part of automatic CPU test discovery.
+CPU checks: KIMI_SGLANG_SOURCE=/path/to/official-sglang python3 -B -S
+tests/test_kimi31_deepep_low_latency.py. Caller tests skip without that source.
+Guide build/check and L0 are required. Guide browser rendering remains
+unverified because this release changes runtime and its textual record only.
+Raw model and probe evidence is retained in the separate debugging workspace.
+
+Release isolation checks: all 15 DeepEP-specific CPU contracts passed with the fixed official source, GPU visibility disabled; L0 and guide build/check passed. The login host lacks Torch and skipped the wrapper test, so actual CPU execution used a container.

@@ -25,6 +25,9 @@ class Kimi31W4A8DeepEPMoEMethod(FusedMoEMethodBase):
 
     def process_weights_after_loading(self, layer):
         from deepgemm import pack_w4a8_moe_hipc_weight
+        from hcu_sglang.layers.moe.ct_w4a8 import register_ops
+
+        register_ops()
 
         self.quant_config.normalize_checkpoint_weights(layer)
         for prefix in ("w13", "w2"):
@@ -35,11 +38,13 @@ class Kimi31W4A8DeepEPMoEMethod(FusedMoEMethodBase):
         layer.w4a8_padded_intermediate_size = layer.w4a8_intermediate_size
         layer.dispatcher.set_quant_config({
             "normal_dispatcher_output_dtype": "int8",
+            "low_latency_dispatcher_output_dtype": "int8",
             "normal_expert_alignment": 256,
             "hcu_w4a8_int8_dispatch": True,
+            "hcu_w4a8_deepep_ll_producer_event": True,
         })
         logging.getLogger(__name__).info(
-            "Kimi31 EP W4A8: DeepGEMM contiguous HIPC, INT8 dispatch, SiTU beta=%s linear_beta=%s",
+            "Kimi31 EP W4A8: DeepGEMM contiguous/masked HIPC, native DeepEP INT8 dispatch, SiTU beta=%s linear_beta=%s",
             self.moe_runner_config.gemm1_alpha,
             self.moe_runner_config.gemm1_clamp_limit,
         )
@@ -53,7 +58,7 @@ def around_get_quant_method(original, config, layer, prefix):
     from sglang.srt.layers.quantization.unquant import UnquantizedLinearMethod
     from sglang.srt.layers.moe.ep_moe.layer import DeepEPMoE
     from sglang.srt.layers.moe.utils import (
-        get_deepep_mode, get_moe_a2a_backend, get_moe_runner_backend,
+        get_moe_a2a_backend, get_moe_runner_backend,
     )
     from sglang.srt.utils import get_bool_env_var
 
@@ -61,8 +66,6 @@ def around_get_quant_method(original, config, layer, prefix):
         return UnquantizedLinearMethod()
     if (isinstance(layer, DeepEPMoE) and get_moe_runner_backend().is_deep_gemm()
             and get_moe_a2a_backend().is_deepep()):
-        if not get_deepep_mode().is_normal():
-            raise ValueError("Kimi31 W4A8 DeepEP currently requires --deepep-mode normal")
         if not get_bool_env_var("SGLANG_USE_W4A8_CONTIGUOUS_HIPC"):
             raise ValueError("Kimi31 W4A8 DeepEP requires SGLANG_USE_W4A8_CONTIGUOUS_HIPC=1")
         return Kimi31W4A8DeepEPMoEMethod(config)
@@ -86,6 +89,7 @@ def around_run_moe_core(original, layer, dispatch_output, *args, **kwargs):
 
 def register_hooks():
     import os
+    os.environ["SGLANG_W4A8_TPMOE_BACKEND"] = "aiter"
     from hcu_sglang.layers.moe import deepep_current
     from sglang.srt.plugins.hook_registry import HookRegistry, HookType
     from hcu_sglang.kimi31_checkpoint import install_checkpoint_loader
