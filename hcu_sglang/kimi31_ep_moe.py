@@ -37,9 +37,10 @@ class Kimi31W4A8DeepEPMoEMethod(FusedMoEMethodBase):
             "normal_dispatcher_output_dtype": "int8",
             "normal_expert_alignment": 256,
             "hcu_w4a8_int8_dispatch": True,
+            "hcu_w4a8_deepep_ll_producer_event": True,
         })
         logging.getLogger(__name__).info(
-            "Kimi31 EP W4A8: DeepGEMM contiguous HIPC, INT8 dispatch, SiTU beta=%s linear_beta=%s",
+            "Kimi31 EP W4A8: DeepGEMM HIPC, INT8 dispatch, SiTU beta=%s linear_beta=%s",
             self.moe_runner_config.gemm1_alpha,
             self.moe_runner_config.gemm1_clamp_limit,
         )
@@ -61,8 +62,8 @@ def around_get_quant_method(original, config, layer, prefix):
         return UnquantizedLinearMethod()
     if (isinstance(layer, DeepEPMoE) and get_moe_runner_backend().is_deep_gemm()
             and get_moe_a2a_backend().is_deepep()):
-        if not get_deepep_mode().is_normal():
-            raise ValueError("Kimi31 W4A8 DeepEP currently requires --deepep-mode normal")
+        if get_deepep_mode().enable_low_latency() and not get_bool_env_var("SGLANG_USE_W4A8_MASKED_HIPC"):
+            raise ValueError("Kimi31 W4A8 low-latency DeepEP requires SGLANG_USE_W4A8_MASKED_HIPC=1")
         if not get_bool_env_var("SGLANG_USE_W4A8_CONTIGUOUS_HIPC"):
             raise ValueError("Kimi31 W4A8 DeepEP requires SGLANG_USE_W4A8_CONTIGUOUS_HIPC=1")
         return Kimi31W4A8DeepEPMoEMethod(config)
@@ -103,6 +104,8 @@ def register_hooks():
         deepep_current.register_hooks()
     else:
         raise ValueError(f"Unsupported Kimi31 EP transport: {transport}")
+    from hcu_sglang.layers.moe.ct_w4a8 import register_ops
+    register_ops()
     HookRegistry.register(
         "hcu_sglang.layers.quantization.slimquant_w4a8_marlin.SlimQuantW4A8Int8MarlinConfig.get_quant_method",
         around_get_quant_method, HookType.AROUND,

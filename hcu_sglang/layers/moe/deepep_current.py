@@ -129,6 +129,11 @@ _DEEPEP_LL_DISPATCH_USES_QUANT_TYPE = (
     and "quant_type" in inspect.signature(Buffer.low_latency_dispatch).parameters
 )
 
+_DEEPEP_LL_CLEAN_USES_TOPK = (
+    _is_hcu and use_deepep
+    and "num_topk" in inspect.signature(Buffer.clean_low_latency_buffer).parameters
+)
+
 
 def _low_latency_dispatch_compat(
     buffer,
@@ -628,7 +633,9 @@ class DeepEPBuffer:
         # HCU LL metadata offsets depend on the expert count. In DSpark the
         # target and draft share this allocation but use different layouts;
         # old payload bytes must not become counters/pointers in the new one.
-        state.buffer.clean_low_latency_buffer(*layout)
+        state.buffer.clean_low_latency_buffer(
+            *layout, **({"num_topk": state.num_topk} if _DEEPEP_LL_CLEAN_USES_TOPK else {})
+        )
         (
             state.num_max_dispatch_tokens_per_rank,
             state.hidden_size,
@@ -644,6 +651,7 @@ class DeepEPBuffer:
             state.num_max_dispatch_tokens_per_rank,
             state.hidden_size,
             state.num_experts,
+            **({"num_topk": state.num_topk} if _DEEPEP_LL_CLEAN_USES_TOPK else {}),
         )
 
     @classmethod
