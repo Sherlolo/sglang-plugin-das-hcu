@@ -1902,7 +1902,6 @@ class SlimQuantW4A8Int8AiterMoEMethod:
         n2 = layer.w2_weight.size(1)
         topk_ids = topk_ids.to(torch.int32)
         topk_weights = topk_weights.to(torch.float32)
-        from sglang.srt.distributed import get_moe_expert_parallel_world_size
         from sglang.srt.layers.moe.utils import get_moe_runner_backend
 
         # moe_c GEMM zeros remote blocks when expert_id==-1. Cub align cannot
@@ -1910,7 +1909,7 @@ class SlimQuantW4A8Int8AiterMoEMethod:
         # - Triton dispatcher already remapped to local ids with -1 drops:
         #   retarget drops to extra expert `e`, then map that id back to -1.
         # - AITER dispatcher keeps global ids: pass the real EP expert_map.
-        ep_size = get_moe_expert_parallel_world_size()
+        ep_size = get_parallel().moe_ep_size
         ids_are_local = not get_moe_runner_backend().is_aiter()
         if ep_size > 1 and ids_are_local:
             drop_id = e
@@ -1977,7 +1976,11 @@ class SlimQuantW4A8Int8AiterMoEMethod:
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             moe_config=moe_config,
-            activation="silu",
+            activation=self.moe_runner_config.activation,
+            gemm1_alpha=(self.moe_runner_config.gemm1_alpha
+                         if self.moe_runner_config.activation == "situ" else None),
+            gemm1_limit=(self.moe_runner_config.gemm1_clamp_limit
+                         if self.moe_runner_config.activation == "situ" else None),
             w1_scale=layer.w13_weight_scale,
             w2_scale=layer.w2_weight_scale,
             global_num_experts=global_num_experts,

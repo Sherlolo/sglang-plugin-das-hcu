@@ -40,7 +40,7 @@ CT=load('hcu_sglang.layers.moe.ct_w4a8',REPO/'hcu_sglang/layers/moe/ct_w4a8.py')
 COMPAT=load('hcu_sglang.kimi31_graph_compat',REPO/'hcu_sglang/kimi31_graph_compat.py')
 
 class DeepEPMaskedTests(unittest.TestCase):
-    def test_masked_wrappers_return_output_not_tile_metadata(self):
+    def test_masked_wrappers_write_output_without_returning_tile_metadata(self):
         output = torch.empty((2, 3))
     
         def gemm(a, b, d, mask, hint):
@@ -50,8 +50,34 @@ class DeepEPMaskedTests(unittest.TestCase):
         with patch.dict(sys.modules, {'deepgemm': vendor}):
             for fn in [CT._masked, CT._masked_hipc]:
                 actual = fn(output, output, output, output, output, torch.zeros(2, dtype=torch.int32), 1)
-                self.assertIs(actual, output)
+                self.assertIsNone(actual)
                 self.assertTrue(torch.all(output == 7))
+
+    def test_registered_masked_ops_use_mutation_only_schema(self):
+        registered = []
+        def register(op_name, op_func, mutates_args, fake_impl):
+            op = torch.library.custom_op("hcu_merge_cpu::" + op_name, op_func,
+                                         mutates_args=mutates_args)
+            op.register_fake(fake_impl)
+            registered.append(op)
+        def gemm(a, b, d, mask, hint):
+            d.fill_(7)
+            return (64, 64)
+        vendor = types.SimpleNamespace(m_grouped_w4a8_gemm_nt_masked=gemm,
+                                       m_grouped_w4a8_gemm_nt_masked_hipc=gemm)
+        with patch.object(common, 'direct_register_custom_op', register, create=True):
+            CT.register_ops()
+        self.assertEqual(len(registered), 2)
+        with patch.dict(sys.modules, {'deepgemm': vendor}):
+            for op in registered:
+                values = [torch.zeros(2, 3) for _ in range(5)]
+                result = op(*values, torch.zeros(2, dtype=torch.int32), 1)
+                self.assertIsNone(result)
+                self.assertTrue(torch.all(values[4] == 7))
+                from torch._subclasses.fake_tensor import FakeTensorMode
+                with FakeTensorMode():
+                    fake_values = [torch.zeros(2, 3) for _ in range(5)]
+                    self.assertIsNone(op(*fake_values, torch.zeros(2, dtype=torch.int32), 1))
 
     def test_masked_situ_preserves_counts_and_parameters(self):
         calls = []

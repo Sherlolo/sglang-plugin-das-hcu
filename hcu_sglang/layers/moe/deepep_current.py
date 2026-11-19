@@ -133,6 +133,11 @@ _DEEPEP_LL_CLEAN_USES_TOPK = (
     and "num_topk" in inspect.signature(Buffer.clean_low_latency_buffer).parameters
 )
 
+_DEEPEP_LL_CLEAN_USES_TOPK = (
+    _is_hcu and use_deepep
+    and "num_topk" in inspect.signature(Buffer.clean_low_latency_buffer).parameters
+)
+
 
 def _low_latency_dispatch_compat(
     buffer,

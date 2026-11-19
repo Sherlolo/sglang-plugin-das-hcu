@@ -38,7 +38,7 @@ class DSAFlashMLAMetadata:
             other.flashmla_metadata, torch.Tensor
         ):
             self.flashmla_metadata.copy_(other.flashmla_metadata)
-        else:
+        elif not getattr(self.flashmla_metadata, "have_initialized", False):
             object.__setattr__(self, "flashmla_metadata", other.flashmla_metadata)
 
         if isinstance(self.num_splits, torch.Tensor) and isinstance(

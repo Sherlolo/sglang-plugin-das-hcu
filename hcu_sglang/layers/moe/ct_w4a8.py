@@ -175,7 +175,8 @@ def forward_masked(self, dispatch_output):
         from lightop import fuse_situ_mul_quant_ep
 
         a2, a2_scale = fuse_situ_mul_quant_ep(
-            gate_up, masked_m,
+            gate_up,
+            masked_m,
             self.moe_runner_config.gemm1_alpha,
             self.moe_runner_config.gemm1_clamp_limit,
             expect_m=expected_m,
@@ -261,13 +262,12 @@ def _masked(
     d: torch.Tensor,
     masked_m: torch.Tensor,
     expected_m_per_group: int,
-) -> torch.Tensor:
+) -> None:
     from deepgemm import m_grouped_w4a8_gemm_nt_masked
 
     m_grouped_w4a8_gemm_nt_masked(
         (a0, a1), (b0, b1), d, masked_m, expected_m_per_group
     )
-    return d
 
 
 def _masked_hipc(
@@ -278,13 +278,12 @@ def _masked_hipc(
     d: torch.Tensor,
     masked_m: torch.Tensor,
     expected_m_per_group: int,
-) -> torch.Tensor:
+) -> None:
     from deepgemm import m_grouped_w4a8_gemm_nt_masked_hipc
 
     m_grouped_w4a8_gemm_nt_masked_hipc(
         (a0, a1), (b0, b1), d, masked_m, expected_m_per_group
     )
-    return d
 
 
 def _masked_fake(
@@ -295,8 +294,8 @@ def _masked_fake(
     d: torch.Tensor,
     masked_m: torch.Tensor,
     expected_m_per_group: int,
-) -> torch.Tensor:
-    return d
+) -> None:
+    return None
 
 
 def register_ops():

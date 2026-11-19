@@ -2,7 +2,7 @@ from inspect import signature
 
 from hcu_sglang import configs, jit_overlay_loader, server_args
 from hcu_sglang.kernel_compat import around_moe_route_radix_covered
-from hcu_sglang.layers.attention.current_dsa.flashmla_backend import get_flashmla_op
+from hcu_sglang.layers.attention.current_dsa.flashmla_backend import DSAFlashMLAMetadata, get_flashmla_op
 from hcu_sglang.layers.quantization import registry
 from sglang.srt.plugins.hook_registry import HookRegistry, HookType
 
@@ -71,15 +71,28 @@ def register_hooks():
     server_args.register()
     registry.register_hooks()
     registry.install_quantization_method()
+    from hcu_sglang.layers.quantization import compressed_int8
+    compressed_int8.register_hooks()
+    from hcu_sglang import kimi31_flashkda
+    kimi31_flashkda.register_hooks()
 
     import os
     if os.environ.get("HCU_KIMI31_DEEPEP") == "1":
         from hcu_sglang.kimi31_ep_moe import register_hooks as register_ep
         register_ep()
+        from hcu_sglang import deepep_graph
+        deepep_graph.register_hooks()
+
+    from hcu_sglang.kimi31_dspark import register_hooks as register_dspark
+    register_dspark()
 
     from hcu_sglang.kimi31_diagnostics import register_hooks as register_diagnostics
     register_diagnostics()
 
     backend = "sglang.srt.layers.attention.dsa_backend.DeepseekSparseAttnBackend"
+    HookRegistry.register(
+        "sglang.srt.layers.attention.dsa_backend.DSAFlashMLAMetadata",
+        DSAFlashMLAMetadata, HookType.REPLACE,
+    )
     for name in ("flash_mla_sparse_fwd", "flash_mla_with_kvcache", "get_mla_metadata"):
         HookRegistry.register(f"{backend}._call_{name}", _flashmla_operation(name), HookType.REPLACE)
