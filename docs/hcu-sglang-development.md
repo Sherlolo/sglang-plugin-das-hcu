@@ -2938,3 +2938,86 @@ unverified because this release changes runtime and its textual record only.
 Raw model and probe evidence is retained in the separate debugging workspace.
 
 Release isolation checks: all 15 DeepEP-specific CPU contracts passed with the fixed official source, GPU visibility disabled; L0 and guide build/check passed. The login host lacks Torch and skipped the wrapper test, so actual CPU execution used a container.
+## 2026-11-18 Kimi K3.1 DSpark 与 DeepEP 低延迟适配（限定请求验证完成）
+
+用途：在固定 SGLang `6321f714ddd9c5da511b0cfefa0ebabc4277cf36` 上接入 Inferact 的 Speculators 格式 DSpark 草稿，保持上游源码只读。plugin 基点 `27f0f0b621414bb4e17e1d9fca2cd5c7642da976`，adapter 基点 `736a6837986aee5ae0373e4af76d4298839b9fea`；实际补丁与文件身份由任务 candidate snapshot 保存。
+
+本次改动：Day-0 注册草稿配置归一化和 DeepEP Graph 适配；将 nested Qwen3 backbone、aux layer IDs、7-token block、Markov head 与 causal sliding window 转给已有 DSpark 实现；W4A8 EP 选择允许 low_latency 并使用 masked HIPC DeepGEMM；SiTU 调用 LightOp 的 masked quantization，保留实际 token count 与 scheduling hint 的区别；combine 使用 producer event 连接计算与通信流。adapter 独立补齐新版本 device helper 和 CUDA feature gate 的接口迁移。
+
+执行与检查：四容器共 16 张 gfx938，目标 TP16/EP16、PP1、DeepEP low_latency、DeepGEMM、decode CUDA Graph。运行环境显式选择 `HCU_KIMI31_EP_TRANSPORT=deepep`、`ROCSHMEM_BACKEND=gda`、`ROCSHMEM_GDA_PROVIDER=shca`。EP dispatch/combine 不使用 NCCL dispatcher；TP collective 的实现单独核验。
+
+当前证据：`${WORK}/evidence/preflight2-rank0.log` 验证真实插件加载与配置解析，得到 capture IDs `[75,79,83,87,91]`、5 层、window 2048、gamma 7、verify width 8；`${WORK}/results/native-smoke2/` 的 16 个 rank 完成 BF16/INT8 native DeepEP 往返，固定输入最大误差均为 0，四个进程组均零退出。第一版微测未按参考用法使用 combine，修正版结果不能用于声称第一版所有时序条件均受支持。权重 96 个 target shard 与 draft 的 SHA256 已保存至任务 release lock。
+
+适配初始待验证项为完整模型 Graph 捕获/重放、masked SiTU 两层 MoE 数值、KDA reject rollback、短长输入/并发/streaming及少量请求的正确性与延迟；下文按实际实验补充结果。启动成功不作为这些检查的替代，未建立相对非投机基线的吞吐收益结论。
+
+首轮完整 target 权重加载完成，但 Graph 捕获命中旧插件复制实现的 `stream_idx` 接口漂移。改为调用当前上游 capture 原函数，仅在成功返回后记录 DeepEP layout；保留当前版本的 forward context、head/tail hooks 与 logits variant 处理。失败现场保存在 `${WORK}/results/dspark-v1/`。验收已按用户要求取消数据集，仅做少量请求。
+
+算子微测发现安装的 HIPC GEMM 返回 launch metadata tuple，旧 Tensor 返回 schema 会报 `Unable to cast (64, 16) to Tensor`。masked GEMM 自定义算子现按实际语义声明为写入 `d`、无返回值，fake 实现一致；未改 vendor wheel。已确认模型实际权重 scale 是 `[E,N,1]`。
+
+新增验证：`${WORK}/evidence/graph-and-moe-v2-rank0.log` 中 6 项 Graph adapter 回归通过；`${WORK}/evidence/moe-numeric-v5.log` 的 masked SiTU/W4A8 eager 与 3 次图重放均通过，最大相对 L2 为 4.36e-4，最大绝对误差 9.77e-4，包含空专家和 count>expected_m。测试夹具使用 vendor 的 high-nibble-first signed INT4 和 `[E,N,1]` scales，先前错误夹具与失败日志保留。完整模型重启仍待验收。
+
+新增 parser Hook 已同步到 source-alignment contract 的 `conditional_profiles.kimi31-day0-dspark`，绑定本次源码提交与 Day-0 环境；既有默认注册 profile 单独保留，不将条件 hook 伪装为默认注册。
+
+第二轮 target/draft 均完成加载，首次 native RocSHMEM 初始化发生 OOM。实测 H3584/world16/E896 的 RDMA size hint 在 max_tokens512 时为6.2207GiB，128时为1.5552GiB；启动脚本将 dispatch 上限与 prefill chunk 同步改为128，避免通信堆与 MoE 临时张量挤占 Graph 余量，继续保留16卡和native DeepEP。失败现场仍保留于 `${WORK}/results/dspark-v2/`，新参数待第三轮验证。
+
+第三轮完成权重加载与通信堆初始化，Graph warmup 在 W4A8 激活类型断言失败。实读接口发现 adapter 默认 DeepEP bridge 已将 vendor `quant_type` 接口包装为上游 `use_fp8` 签名，导致本插件未识别 INT8 vendor 分支。此组合必须显式 `HCU_DEEPEP_BRIDGE=0`，由插件的 vendor ABI 适配单独负责 dispatch；DeepGEMM bridge 仍启用。`${WORK}/results/dspark-v3/` 保存原始失败；带完整 adapter/plugin 环境的16-rank INT8 dispatch Graph 验证与第四轮服务仍待通过。
+
+第四轮 target verify Graph 完成 `[2,4,8]` 全部捕获，草稿 Graph sizing 随后因全局 EP 引出的 attention TP gather 要求而得到空 bucket：7-token GQA 草稿的1/2/4/8档均不满足16行对齐。GQA 草稿直接运行 dense TP attention/MLP，不消费目标的 SP gathered buffer；Day-0 新增 `_draft_context` around Hook，只在非 MoE 草稿 scope 内以公开 parallel override 设置 `disable_attn_tp_gather=True`，退出 scope 恢复原值，目标 Kimi 与 MoE 草稿仍保留原行为。新 Hook 同步条件 source-alignment contract；CPU 对齐/异常退出回归与第五轮服务待验证。失败现场 `${WORK}/results/dspark-v4/`。
+
+第五轮 target `[2,4,8]` 与 draft `[1,2,4,8]` Graph 全16rank完成捕获，健康检查200；首个正式请求在 target Graph replay 的 FlashMLA metadata slice 失败。HCU `get_mla_metadata` 实际返回惰性 `FlashMLASchedMeta` 对象和 `None`，当前 upstream wrapper 直接切片 None。Day-0 复用插件已有支持 optional splits/opaque scheduler 的 `DSAFlashMLAMetadata`，不修改 vendor 或 SGLang。每个 bucket 仍保留原捕获 scheduler 对象，slice 保持该对象引用；tensor metadata 的 copy 保持原地址。新增实际注册/None-splits与bucket引用回归，失败请求及元信息保留在 `${WORK}/results/request-smoke/`，并未返回有效回复。
+
+第六轮候选 `542f98b7f0e09d6e587d0c59e52f36c86011bbe625f81f51ded600d27468cf09` 完成16rank target/draft Graph捕获，真实decode日志为 `cuda graph: True`。7个手写场景取得通过记录：事实计算、斐波那契、5170-token抽取、两个并发计算、完整SSE和重复斐波那契；不运行数据集。实际9次HTTP请求包含2次保留的原始断言失败：未约定数字类型时输出字符串9.9，以及384-token上限截断的说明；补明确类型与简短说明要求后通过，原失败未改写。证据 `${WORK}/results/functional-validation.json` 关联 v6b的前五个结果与v6c的后两个结果，不能把v6b整轮receipt当作通过。
+
+SSE首个content延迟1.049秒，103输出token端到端37.095秒（2.777 token/s，含prefill），finish=stop且收到DONE；7个通过请求草稿累计接受202/427，61次验证输出256token，平均4.197 token/轮。实际token pool12928、最大请求输入12922；66560配置值不构成64K容量验证。混合接受/拒绝已执行，但没有完整target-only逐token参考、数据集精度、非投机加速比、并发4/8输出或独立flow复核。DeepEP/SHCA运行库现场在全部16个scheduler可见；EP通信不切换NCCL。导出补丁绑定加载候选，后续其他工作区改动不纳入本次运行结论；完整方法、性能口径与限制见 `${WORK}/REPORT.md`。导览生成检查与浏览器视觉验收分别记录，未执行浏览器截图。
+
+## Kimi DFlash TP16 AITER 激活适配（2026-11-18）
+
+AITER W4A8 TP MoE 的 apply 过去硬编码 silu，丢失 Kimi SiTU。现按 runner config 传递 activation，并仅对 SiTU 传递 gemm1_alpha/gemm1_clamp_limit。当前目标配置 beta=4、linear_beta=25，与本机 AITER moe_c SiTU 内核一致。来源 SGLang 不修改，已有 DSpark/DeepEP 改动保留。CPU 分发回归、HCU 数学和完整 DFlash Graph/服务验证分别记录在任务工作区；在实测完成前不宣称精度与性能通过。
+
+CPU公共apply反例还暴露旧distributed.get_moe_expert_parallel_world_size在固定上游已移除，AITER路径改读get_parallel().moe_ep_size，避免真实首请求ImportError。
+
+## Kimi DSpark 的 Attention DP 与原生 DeepEP（2026-11-18）
+
+SGLang 基点为 `6321f714ddd9c5da511b0cfefa0ebabc4277cf36`。参考 HYGON-AI/sglang-das `da8642a25aa7b1056f5ed5bfccd8cd20aa487877` 的 DSpark 后端校验，Kimi Day-0 插件通过上游 `register_dspark_dp_a2a_backends` 将 `deepep` 加入 Kimi K3.1 架构的允许列表。仅在 `HCU_KIMI31_DEEPEP=1` 且选择原生 DeepEP transport 时注册，保留已有后端及其他架构的配置。上游的 DP LM head、static verify、CP 与 target/draft 后端检查仍生效。
+
+目标验证配置为 TP16、EP16、Attention DP2、DeepEP auto、DeepGEMM、DSpark、full CUDA Graph 和 Fake PD decode。参数解析、图捕获、真实请求和压测分别验收。
+
+验证：四项 DSpark 回归与 L0 通过。使用报告启动脚本的实际参数和插件入口执行 ServerArgs 解析，确认 TP16/EP16、Attention DP2、DSpark、DeepEP auto、DeepGEMM、Fake PD decode 与 full Graph 均保留，原先的后端拒绝已解除。配置解析未加载权重，完整模型捕获、回放和并发性能待验证。导览生成和快照校验已执行，浏览器视觉复核未执行。
+
+32 卡诊断：报告脚本默认 chunk 128 在 DP4 下解析为每组 32，无法被 KV page 64 整除。测试增加启动覆盖 chunk 256，解析为每组 64。随后 GDA 配置在 32 rank 全模型 target Graph 预热的 DeepEP Buffer.sync 阶段报 invalid device pointer。8 Pod 原生通信探针改用 DEEP_EP_NORMAL_MNVL=1、ROCSHMEM_IPC_MNVL=1、ROCSHMEM_IPC_MNVL_NPES=32，所有 32 rank 完成缓冲区初始化、INT8 low-latency 往返及 normal 后的 Graph 重放。插件在 vendor clean API 支持时显式传递当前 top-k，避免 Kimi top-k 16 沿用 API 默认值 8。探针使用合成输入和通信往返，完整模型验证独立记录。
+
+## Kimi K3.1 HCU FlashKDA prefill bridge（2026-11-19）
+
+用途：在 TP32/EP32、Attention DP1、无 DSpark 的 Kimi K3.1 中，将 `--linear-attn-prefill-backend flashkda` 接入已安装的 HCU FlashKDA wheel；decode 仍由 `--linear-attn-backend triton` 选择。目标权重 `linear_attn_config` 声明 96 个 KDA heads、128 维和 `gate_lower_bound=-5.0`，TP32 下每 rank 3 heads；本轮启动脚本显式 `--mamba-ssm-dtype bfloat16`。当前插件仅在 Day-0 注册，未修改上游 SGLang 或 adapter。
+
+实现：新增 `hcu_sglang/kimi31_flashkda.py`，在 Day-0 对当前 SGLang `FlashKDAKernel.extend` 注册 AROUND Hook。支持 BF16 Q/K/V/g/beta、BF16 或 FP32 `[slot,H,V,K]` state、K=V=128、已激活安全门限及 raw beta 的 varlen prefill。满足条件时调用上游包装器的真实 `flash_kda.fwd` 与 state gather/scatter；返回 Tensor，修复当前上游 fused 分支无条件返回 `(Tensor,None)` 与 KDA 调用方不匹配的问题。空 batch 不调用 native kernel；tracking、speculation、非支持形状/门限/序列长、非法或重复 state slot 等退回当前 adapter 修补后的 Triton KDA。支持长度暂限每序列 64..2048，未扩大到旧 0.5.18 fork 的任意长度路径。GPU offset/slot 检查有 host 同步，后续性能复核需记录该开销。
+
+依赖：8 Pod 均有 `flash_kda` HCU wheel `0.0.1+dtk2610.torch2130.2611101126.g496f39` 与 `flash_kda_C`；远端纯 CPU import 已通过，未初始化 GPU。CPU 回归位于 `tests/runtime/kimi31_flashkda_cpu.py`，5 项通过，覆盖真实包装器的 BF16 strided state gather/scatter、裸 Tensor 返回、非法 slot/tracking 回退和 Hook 目标；独立 CPU `load_plugins()` 检查确认目标 Hook 已应用。`ci/l0_gate.py` 通过（711 Python 文件），脚本和桥接源码完成语法编译。GPU 数值脚本位于任务工作区 `work_log/1119/nodspark/flashkda_parity.py`，预备比较 H3/K128、BF16 state、等长/不等长 varlen、非连续 slot、两段续算与未选 slot 不变，输出 JSON；本次未执行 GPU probe、完整服务、Graph 或真实性能验收。当前服务须在下次重启显式选择 `LINEAR_PREFILL_BACKEND=flashkda` 才会使用新路径。
+
+门禁：`python3 ci/l0_gate.py` 通过（711 Python 文件）；`python3 tools/build_guide.py --check` 和 `git diff --check` 通过。全仓本机 `python3 -m unittest discover -s tests -v` 已运行 218 项，81 failures、13 errors、32 skipped，原始输出保存在 `work_log/1119/nodspark/flashkda-full-unittest.log`。实际错误包括本机缺 `torch`、3 项 hybrid-pool closure 测试找不到 `input-code/sglang/.../hybrid_pool_assembler.py`；失败包括 source AST/哈希快照不符及一个 mocked `arg_utils.field_names` 导入失败。与本仓已有验证记录的故障类别相符，但本次未重跑无改动基线，不能判定全部为既有问题，亦未把全仓结果记作通过。本次新增定向 CPU 测试在 HCU 容器执行 5 项通过，退出码 0。
+
+## Kimi K3.1 W8A8 DSpark Day-0 接线（2026-11-19）
+
+用途：在同一 SGLang 固定提交上使用 `Kimi-K3.1-Pro-DSpark-w8a8` 草稿。其 `main/Kimi-K3.1-Pro-DSpark-w8a8/config.json` 声明 `compressed-tensors`、channel INT8 权重和 token INT8 动态激活；旧 BF16 草稿使用的 `--speculative-draft-model-quantization unquant` 不适用于此权重，启动需显式选择 `compressed-tensors`，避免草稿继承目标 W4A8 方法。
+
+改动范围：`HCU_KIMI31_DAY0=1` 的提前返回路径原先仅注册量化配置，未注册已有的 `CompressedTensorsW8A8Int8` HCU dense Linear Hook。现在在配置注册后懒加载 `compressed_int8.register_hooks()`，覆盖构造、加载后权重布局和 `apply_weights`；普通插件入口及目标 W4A8 的方法选择不变。`tests/test_kimi31_day0_w8a8.py` 检查 Day-0 实际注册和 HCU apply 回调，并在权重可见时用上述配置检查 CT INT8 scheme 选择。
+
+检查：`ci/l0_gate.py` 通过（709 Python 文件、8 个 Skill）；`compileall`、`git diff --check`、JSON 解析和导览重建/快照检查通过。本机无 `torch`，两项运行时 unittest 明确跳过；HCU 容器内执行 `python3 -m unittest discover -s tests -p test_kimi31_day0_w8a8.py -v` 为 2 tests OK、退出码 0，原始输出在任务工作区 `remote-w8a8-unit.log`。进程退出时有 `torch.library` weakref 清理异常日志，未影响测试断言。32-rank 权重加载、Graph、请求质量与性能需要分别记录，不以定向 CPU 回归代替。全仓 `unittest discover` 在本机因缺运行依赖和既有来源哈希漂移失败（218 tests，81 failures、13 errors、32 skipped），不作为本次通过证据。
+
+
+## 2026-11-19 合并组合验证
+
+合并 li425 与 Sherlolo 两侧的 Kimi 适配；保留条件 Hook profile、DSpark/FlashKDA/W8A8 接线与显式 Graph 兼容开关。masked GEMM 统一为写入 d、无返回值，fake 契约一致；metadata copy 保留已初始化 scheduler 身份。验证以远程 CPU 定向测试为准，不启动 GPU 服务或探针。详细执行记录存于本次独立验证工作目录，尚未完成的组合不得据历史记录宣称通过。
+
+远程 CPU 验证：Python3.12/Torch2.13，固定 SGLang 6321f714。DeepEP契约16、DSpark4、FlashKDA5直接通过；Graph adapter6、metadata2、AITER activation1、W8A8 Hook2在模拟导入期device properties/current device的CPU夹具下通过，共36项。GPU可见性为空；夹具禁止CUDA lazy init并确认CUDA_INITIALIZED=False。首轮无夹具导入LightOp因设备属性查询失败，保留日志，不宣称真实无设备环境完整插件加载通过。另有vendor退出期weakref/nanobind清理日志，已保留原件；不把它们解释为本轮业务断言失败。未执行GPU数值、Graph capture或模型请求验证。
+## Kimi31 DSpark 分页 MQA 接入（2026-11-19）
+
+用途：Kimi31 day0 路径通过 `HCU_KIMI31_DEEPGEMM_MQA=1` 选择当前 DeepGEMM 的 `paged_mqa_logits`，默认关闭。入口为 `kimi31_day0.register_hooks` → `kimi31_mqa.register_hooks` → `Indexer._paged_mqa_logits` 的 AROUND。非 E4M3FN Q、uint8 packed KV、64-token page、128维、8/16/32/64 heads 保留原包装链。可选库在实际调用时导入，算子错误直接上报。
+
+DSpark 的验证 query 展开为独立 R=1 行，保留传入的每行 context；传入请求终点时用 `end-R+r+1` 构造因果终点，页表按请求复制。weights 已由上游折入 Q scale；cache 要求每页 K bytes 后接 FP32 scales，原生 fused index-cache writer 提供该布局。接口强制 clean logits，避免 downstream top-k 读取未初始化 tail。该实现不使用 sparse-mask 接口，不改变 top-k 消费者。
+
+共享专家使用固定引擎已有 `--shared-experts-tp-size`，其权重分片及 gather/reduce-scatter 归引擎所有；本接入不重复添加 collective，不修改 SGLang 源码。
+
+本次验证：gfx938/BW1300_LC 的当前安装 DeepGEMM 上，signed FP8、非顺序页表、独立 scales、原生 R1/R2 和适配 R1/R7/R8 的逐行因果结果对 FP32 reference 通过，覆盖 CUDA Graph capture/replay；CPU 契约用例覆盖显式逐行长度、请求终点展开与原链回退。完整模型质量、性能与 profile 状态以私有任务报告为准；本节不将算子测试称为模型精度验收。
+
+用户指定共享专家 TP16 时，使用 `--attn-dp-size 1 --shared-experts-tp-size 16`，避免跨 attention-DP 复制组。16 卡 BF16 reduce-scatter 的 checkpoint 第1层初筛出现最大绝对误差0.125，触及预设 `<0.125` 门槛；相对L2约0.0057。新增 `kimi31_shared_tp.around_reduce_scatter`，仅对 world_size=16 的 BF16 共享输出以 FP32 通信归约后转回输入 dtype；其他情况回退当前原链。验证阈值保持不变，最终16卡实测状态见任务报告。四卡结果不代替16卡验证，通信字节增大及吞吐影响须实测。
