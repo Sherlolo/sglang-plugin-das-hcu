@@ -3010,3 +3010,14 @@ SGLang 基点为 `6321f714ddd9c5da511b0cfefa0ebabc4277cf36`。参考 HYGON-AI/sg
 合并 li425 与 Sherlolo 两侧的 Kimi 适配；保留条件 Hook profile、DSpark/FlashKDA/W8A8 接线与显式 Graph 兼容开关。masked GEMM 统一为写入 d、无返回值，fake 契约一致；metadata copy 保留已初始化 scheduler 身份。验证以远程 CPU 定向测试为准，不启动 GPU 服务或探针。详细执行记录存于本次独立验证工作目录，尚未完成的组合不得据历史记录宣称通过。
 
 远程 CPU 验证：Python3.12/Torch2.13，固定 SGLang 6321f714。DeepEP契约16、DSpark4、FlashKDA5直接通过；Graph adapter6、metadata2、AITER activation1、W8A8 Hook2在模拟导入期device properties/current device的CPU夹具下通过，共36项。GPU可见性为空；夹具禁止CUDA lazy init并确认CUDA_INITIALIZED=False。首轮无夹具导入LightOp因设备属性查询失败，保留日志，不宣称真实无设备环境完整插件加载通过。另有vendor退出期weakref/nanobind清理日志，已保留原件；不把它们解释为本轮业务断言失败。未执行GPU数值、Graph capture或模型请求验证。
+## Kimi31 DSpark 分页 MQA 接入（2026-11-19）
+
+用途：Kimi31 day0 路径通过 `HCU_KIMI31_DEEPGEMM_MQA=1` 选择当前 DeepGEMM 的 `paged_mqa_logits`，默认关闭。入口为 `kimi31_day0.register_hooks` → `kimi31_mqa.register_hooks` → `Indexer._paged_mqa_logits` 的 AROUND。非 E4M3FN Q、uint8 packed KV、64-token page、128维、8/16/32/64 heads 保留原包装链。可选库在实际调用时导入，算子错误直接上报。
+
+DSpark 的验证 query 展开为独立 R=1 行，保留传入的每行 context；传入请求终点时用 `end-R+r+1` 构造因果终点，页表按请求复制。weights 已由上游折入 Q scale；cache 要求每页 K bytes 后接 FP32 scales，原生 fused index-cache writer 提供该布局。接口强制 clean logits，避免 downstream top-k 读取未初始化 tail。该实现不使用 sparse-mask 接口，不改变 top-k 消费者。
+
+共享专家使用固定引擎已有 `--shared-experts-tp-size`，其权重分片及 gather/reduce-scatter 归引擎所有；本接入不重复添加 collective，不修改 SGLang 源码。
+
+本次验证：gfx938/BW1300_LC 的当前安装 DeepGEMM 上，signed FP8、非顺序页表、独立 scales、原生 R1/R2 和适配 R1/R7/R8 的逐行因果结果对 FP32 reference 通过，覆盖 CUDA Graph capture/replay；CPU 契约用例覆盖显式逐行长度、请求终点展开与原链回退。完整模型质量、性能与 profile 状态以私有任务报告为准；本节不将算子测试称为模型精度验收。
+
+用户指定共享专家 TP16 时，使用 `--attn-dp-size 1 --shared-experts-tp-size 16`，避免跨 attention-DP 复制组。16 卡 BF16 reduce-scatter 的 checkpoint 第1层初筛出现最大绝对误差0.125，触及预设 `<0.125` 门槛；相对L2约0.0057。新增 `kimi31_shared_tp.around_reduce_scatter`，仅对 world_size=16 的 BF16 共享输出以 FP32 通信归约后转回输入 dtype；其他情况回退当前原链。验证阈值保持不变，最终16卡实测状态见任务报告。四卡结果不代替16卡验证，通信字节增大及吞吐影响须实测。
