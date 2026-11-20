@@ -79,6 +79,10 @@ def register_hooks():
     from sglang.srt.plugins.hook_registry import HookRegistry, HookType
 
     register_dp_deepep()
+    if os.environ.get("HCU_KIMI31_HISPARSE_DSPARK") == "1":
+        from hcu_sglang import kimi31_hisparse_dspark
+
+        kimi31_hisparse_dspark.register_hooks()
 
     HookRegistry.register(
         "sglang.srt.hf_transformers.config.HfModelConfigParser.parse",
