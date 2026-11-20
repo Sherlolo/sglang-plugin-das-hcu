@@ -2956,3 +2956,15 @@ SGLang 基点为 `6321f714ddd9c5da511b0cfefa0ebabc4277cf36`。参考 HYGON-AI/sg
 改动范围：`HCU_KIMI31_DAY0=1` 的提前返回路径原先仅注册量化配置，未注册已有的 `CompressedTensorsW8A8Int8` HCU dense Linear Hook。现在在配置注册后懒加载 `compressed_int8.register_hooks()`，覆盖构造、加载后权重布局和 `apply_weights`；普通插件入口及目标 W4A8 的方法选择不变。`tests/test_kimi31_day0_w8a8.py` 检查 Day-0 实际注册和 HCU apply 回调，并在权重可见时用上述配置检查 CT INT8 scheme 选择。
 
 检查：`ci/l0_gate.py` 通过（709 Python 文件、8 个 Skill）；`compileall`、`git diff --check`、JSON 解析和导览重建/快照检查通过。本机无 `torch`，两项运行时 unittest 明确跳过；HCU 容器内执行 `python3 -m unittest discover -s tests -p test_kimi31_day0_w8a8.py -v` 为 2 tests OK、退出码 0，原始输出在任务工作区 `remote-w8a8-unit.log`。进程退出时有 `torch.library` weakref 清理异常日志，未影响测试断言。32-rank 权重加载、Graph、请求质量与性能需要分别记录，不以定向 CPU 回归代替。全仓 `unittest discover` 在本机因缺运行依赖和既有来源哈希漂移失败（218 tests，81 failures、13 errors、32 skipped），不作为本次通过证据。
+
+## Kimi31 DSpark 分页 MQA 接入（2026-11-19）
+
+用途：Kimi31 day0 路径通过 `HCU_KIMI31_DEEPGEMM_MQA=1` 选择当前 DeepGEMM 的 `paged_mqa_logits`，默认关闭。入口为 `kimi31_day0.register_hooks` → `kimi31_mqa.register_hooks` → `Indexer._paged_mqa_logits` 的 AROUND。非 E4M3FN Q、uint8 packed KV、64-token page、128维、8/16/32/64 heads 保留原包装链。可选库在实际调用时导入，算子错误直接上报。
+
+DSpark 的验证 query 展开为独立 R=1 行，保留传入的每行 context；传入请求终点时用 `end-R+r+1` 构造因果终点，页表按请求复制。weights 已由上游折入 Q scale；cache 要求每页 K bytes 后接 FP32 scales，原生 fused index-cache writer 提供该布局。接口强制 clean logits，避免 downstream top-k 读取未初始化 tail。该实现不使用 sparse-mask 接口，不改变 top-k 消费者。
+
+共享专家使用固定引擎已有 `--shared-experts-tp-size`，其权重分片及 gather/reduce-scatter 归引擎所有；本接入不重复添加 collective，不修改 SGLang 源码。
+
+本次验证：gfx938/BW1300_LC 的当前安装 DeepGEMM 上，signed FP8、非顺序页表、独立 scales、原生 R1/R2 和适配 R1/R7/R8 的逐行因果结果对 FP32 reference 通过，覆盖 CUDA Graph capture/replay；CPU 契约用例覆盖显式逐行长度、请求终点展开与原链回退。完整模型质量、性能与 profile 状态以私有任务报告为准；本节不将算子测试称为模型精度验收。
+
+用户指定共享专家 TP16 时，使用 `--attn-dp-size 1 --shared-experts-tp-size 16`，避免跨 attention-DP 复制组。16 卡 BF16 reduce-scatter 的 checkpoint 第1层初筛出现最大绝对误差0.125，触及预设 `<0.125` 门槛；相对L2约0.0057。新增 `kimi31_shared_tp.around_reduce_scatter`，仅对 world_size=16 的 BF16 共享输出以 FP32 通信归约后转回输入 dtype；其他情况回退当前原链。验证阈值保持不变，最终16卡实测状态见任务报告。四卡结果不代替16卡验证，通信字节增大及吞吐影响须实测。

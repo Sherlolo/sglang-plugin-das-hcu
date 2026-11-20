@@ -76,6 +76,12 @@ def register_hooks():
         from hcu_sglang import deepep_graph
         deepep_graph.register_hooks()
 
+    from hcu_sglang import kimi31_shared_tp
+    kimi31_shared_tp.register_hooks()
+
+    from hcu_sglang import kimi31_mqa
+    kimi31_mqa.register_hooks()
+
     from hcu_sglang.kimi31_dspark import register_hooks as register_dspark
     register_dspark()
 
