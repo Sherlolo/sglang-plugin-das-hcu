@@ -88,12 +88,17 @@ def register_hooks():
 
     from hcu_sglang import kimi31_mqa
     kimi31_mqa.register_hooks()
+    from hcu_sglang import kimi31_sparse_prefill
+    kimi31_sparse_prefill.register_hooks()
 
     from hcu_sglang.kimi31_dspark import register_hooks as register_dspark
     register_dspark()
 
     from hcu_sglang.kimi31_diagnostics import register_hooks as register_diagnostics
     register_diagnostics()
+
+    from hcu_sglang.kimi31_dcp import register_hooks as register_dcp
+    register_dcp()
 
     backend = "sglang.srt.layers.attention.dsa_backend.DeepseekSparseAttnBackend"
     HookRegistry.register(

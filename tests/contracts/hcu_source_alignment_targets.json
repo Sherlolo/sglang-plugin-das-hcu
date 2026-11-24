@@ -668,6 +668,29 @@
   "profile": "fixed official, HCU default registration; not whole-model equivalence",
   "source_sha": "15c7204b7a3b6edaa222cff80018d8e5f2b2ad0e",
   "optional_profiles": {
+    "kimi31_flashmla_sparse_heads": {
+      "source_sha": "6321f714ddd9c5da511b0cfefa0ebabc4277cf36",
+      "environment": {
+        "HCU_KIMI31_DAY0": "1",
+        "HCU_KIMI31_FLASHMLA_SPARSE_HEADS": "1"
+      },
+      "expected_hook_targets": [
+        "sglang.srt.arg_groups.overrides._kimi_k31_dsa_backends",
+        "sglang.srt.layers.attention.dsa_backend.DeepseekSparseAttnBackend._forward_flashmla_sparse"
+      ]
+    },
+    "kimi31_deepgemm_prefill_mqa": {
+      "source_sha": "6321f714ddd9c5da511b0cfefa0ebabc4277cf36",
+      "environment": {
+        "HCU_KIMI31_DAY0": "1",
+        "HCU_KIMI31_DEEPGEMM_MQA": "0",
+        "HCU_KIMI31_DEEPGEMM_PREFILL_MQA": "1",
+        "SGLANG_FP8_PAGED_MQA_LOGITS_TORCH": "1"
+      },
+      "expected_hook_targets": [
+        "sglang.srt.layers.attention.dsa.dsa_indexer.Indexer._mqa_logits"
+      ]
+    },
     "kimi31_deepep_full_graph": {
       "environment": {
         "HCU_KIMI31_DAY0": "1",
@@ -677,6 +700,16 @@
       "expected_hook_targets": [
         "sglang.srt.layers.attention.dsa_backend.DeepseekSparseAttnBackend._compute_flashmla_metadata",
         "sglang.srt.layers.attention.linear.kernels.kda_triton.TritonKDAKernel.packed_decode"
+      ]
+    },
+    "kimi31_cpu_metadata_cache": {
+      "source_sha": "15c7204b7a3b6edaa222cff80018d8e5f2b2ad0e",
+      "environment": {
+        "HCU_KIMI31_DAY0": "1",
+        "HCU_KIMI31_CPU_METADATA_CACHE": "1"
+      },
+      "expected_hook_targets": [
+        "sglang.srt.model_executor.model_runner.ModelRunner.forward"
       ]
     }
   },

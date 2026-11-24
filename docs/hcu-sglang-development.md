@@ -3021,3 +3021,87 @@ DSpark 的验证 query 展开为独立 R=1 行，保留传入的每行 context�
 本次验证：gfx938/BW1300_LC 的当前安装 DeepGEMM 上，signed FP8、非顺序页表、独立 scales、原生 R1/R2 和适配 R1/R7/R8 的逐行因果结果对 FP32 reference 通过，覆盖 CUDA Graph capture/replay；CPU 契约用例覆盖显式逐行长度、请求终点展开与原链回退。完整模型质量、性能与 profile 状态以私有任务报告为准；本节不将算子测试称为模型精度验收。
 
 用户指定共享专家 TP16 时，使用 `--attn-dp-size 1 --shared-experts-tp-size 16`，避免跨 attention-DP 复制组。16 卡 BF16 reduce-scatter 的 checkpoint 第1层初筛出现最大绝对误差0.125，触及预设 `<0.125` 门槛；相对L2约0.0057。新增 `kimi31_shared_tp.around_reduce_scatter`，仅对 world_size=16 的 BF16 共享输出以 FP32 通信归约后转回输入 dtype；其他情况回退当前原链。验证阈值保持不变，最终16卡实测状态见任务报告。四卡结果不代替16卡验证，通信字节增大及吞吐影响须实测。
+
+## Kimi31 CP8 EP8 PP2 prefill 候选（2026-11-20）
+
+2026-11-21完成16卡组合验证。131072输入、1输出、C1、cache关闭，相同固定token输入预热后三次正式耗时18.5723/18.6499/18.5977秒，平均18.6066秒、聚合7044.37 input token/s，相对历史6246.61提升12.77%，耗时缩短11.32%。三次均包含请求构造/JSON编码、HTTP往返和响应解析；较早两次追加样本排除了编码时间，已保留并由统一边界补测替代。本轮权重为用户指定ModelSlim，历史参考为channel版本；该对照包含权重格式与环境差异。指定bench脚本的seed42生成输入C1/2/4/8吞吐为6822.83/7166.96/7358.36/7452.01 token/s，15/15正式请求成功、cache0，每档一次。固定输入与bench生成输入分别保留。
+
+少量完整答案检查6/6通过，覆盖64/131072输入与C1/C2，答案去除首尾空白后均为4827，正常stop、logprob有限、cache0。原严格脚本的0.1 logprob门限测得0.1015878，长请求相对参考多首空格；原始差异保留。按用户明确的轻量精度范围验收完整答案，未报告逐token/数值等价或数据集精度。
+
+完整128K/1请求的16rank GPU trace已采集，两个PP阶段的DeepGEMM prefill FP8 MQA、FlashMLA sparse和FlashKDA原生内核已确认。FlashKDA本机64CU选择raw路径，长chunk形状为(1,16384,12,128)，与服务attention CP8分组分别记录。正式版本通信使用NCCL all-gather/reduce-scatter EP，专家仍为DeepGEMM W4A8 HIPC。原生DeepEP normal MNVL在同一新实例的16rank、BF16/INT8通信检查通过，完整模型性能交付使用NCCL版本。
+
+迁移后针对性CPU合同26项、L0与导览生成/check通过。Torch Profiler单rank由上游triage和TraceLens分别复核两个PP代表rank，原始16rank保留；未校准跨节点时钟或BW1300 roofline。导览浏览器视觉检查未执行。下列段落保留前置开发阶段的过程记录。
+
+用户重新授权继续优化后，候选已迁入指定插件工作树。新四实例使用NCCL Socket，prefill选择FlashMLA sparse和FlashKDA，启用DeepGEMM ragged prefill MQA。实卡sparse验证H12/H96、带/不带sink与top-k长度，三用例均通过，相对L2最大0.001877。模型质量、性能与实际后端命中仍待本轮服务验证。
+
+首个候选在上游Kimi参数解析阶段拒绝sparse/kv组合。新增opt-in `_kimi_k31_dsa_backends` AROUND，用只读ResolvedView调用原校验并声明sparse prefill，保留kv decode及HiSparse拒绝。BF16 sparse prefill由已有RAGGED路径消费新KV或反量化前缀，decode继续读取FP8池。该组合需完整模型长请求验证。失败attempt和第二次启动记录保留在任务目录。
+
+用途：在 SGLang `6321f714`、adapter `bcc63ef1` 与 plugin `ffcb55cf` 组合上接入原生 prefill MQA、长序列 FlashKDA 和 FlashMLA sparse head padding。开发使用 [hcu-plugin-dev](../skills/hcu-plugin-dev/SKILL.md)，不修改 SGLang。当前改动为独立候选，MQA/FlashKDA wrapper 已有下述实卡资格，完整模型质量、性能仍待验收。
+
+`HCU_KIMI31_DEEPGEMM_PREFILL_MQA=1` 独立注册 `Indexer._mqa_logits`，不依赖 decode 的 `HCU_KIMI31_DEEPGEMM_MQA`。支持 signed E4M3FN、D128、H8/16/32/64；把 ragged K/scales 整理为64-token页，每页先8192字节K，再256字节FP32 scales，调用当前 DeepGEMM `paged_mqa_logits(is_prefill=True, clean_logits=True)`。保留每行终点并补起点 mask；不支持的输入返回 Hook 接收的有效原链，原生执行错误直接上报。固定组合的正确回退需 `SGLANG_FP8_PAGED_MQA_LOGITS_TORCH=1`：当前 adapter 的 ragged 路径缺少逐head ReLU，仅关闭 reduce-heads 不足以恢复数学合同。新注册目标单列在 optional source-alignment profile，不改默认 profile。
+
+`HCU_KIMI31_FLASHKDA_LONG_PREFILL=1` 放宽64..2048至64..131072的序列范围，新增调用保留融合归一化、gate/beta、初始状态与索引写回。等长 batch 用 fixed layout，不等长仍传完整 varlen offsets；空输入、状态跟踪、speculation、无效索引和非支持 dtype 保留原有保护。`HCU_KIMI31_FLASHKDA_FIXED_CP` 未设置时由库选择，0禁用设备内CP，1显式请求；当前 gfx938/64CU 不在安装库默认校准表中，不能由 FlashKDA 后端名称推断 CP 已生效。库必须提供 `enable_cp` 和 `_dispatch_info` 参数，实际路由保存在日志与 Prof annotation 中。该开关与服务的 attention CP8 分组不同。
+
+本次 CPU prefill MQA 契约11项、FlashKDA契约8项通过。gfx938/64CU 上新增 MQA wrapper 的 signed FP8/H8/H32、KV70/2048/131072 数值与起止mask通过，相对L2小于8e-8。FlashKDA 的H12、长度64/2112/16384、等长双请求4096/4096和变长2112/64均通过输出与状态对拍；输出相对L2小于0.0041，状态小于0.0007。初轮参考未复制输入，受到 Triton 原地修改影响而失败；修正夹具后重测，保留原失败。两次重试还因包装脚本参数传递失败而未进入数值测试，不计作通过。
+
+`HCU_KIMI31_FLASHMLA_SPARSE_HEADS=1` 为原有原生 FlashMLA 集成增加 head packing 能力。固定上游方法对 H12/H96 等不能整除64的 head 数在调用 provider 前断言；本候选 AROUND 将 BF16 Q 和可选 sink 补齐到下一个64的倍数，调用收到的有效原链并裁剪输出。覆盖 D512/576、V512、H1..128 中需要额外补齐的情形；不支持输入仍走原链，KV、top-k 索引/长度和 scale 不变，kernel 异常直接上报。与 adapter 的设备适配分开，不复制上游完整 attention 方法。目标列入独立 optional profile，默认关闭；关闭后保持原来的上游限制。
+
+FlashMLA CPU 契约5项通过：抽取固定上游真实方法，以 H96/sink 和 H12/无sink 复现原断言，经 AROUND 分发后验证 padding、索引、长度、sink、输出裁剪以及回退、注册与错误传播。仅把昂贵 provider 替换为张量计算，CPU 夹具模拟 HIP 分支；新增 sparse head padding 尚无实卡数值/完整模型证据。
+
+显式CP在单条2112和16384命中，其余测试由库回退RAW。每种仅3次GPU event计时，16384的RAW/CP中位数约2.19/1.83ms，2112约0.63/0.85ms；包含wrapper状态整理及写回，属于预热后单卡微测，不能外推模型收益。正式128k场景、四格模型质量、组合dispatch与16rank Prof仍待执行。服务基线使用原有plugin工作树，候选未热更新到运行服务。导览结构/链接与生成快照检查通过；未执行浏览器截图验收。
+
+## Kimi31 eager prefill 前向内元数据缓存（2026-11-23）
+
+用途：减少 FlashKDA 各层重复读取同一批次 GPU 索引引起的主机复制与同步。
+开发入口为 `skills/hcu-plugin-dev/SKILL.md`，主机路径优化按模型优化闭环验收。
+
+`HCU_KIMI31_CPU_METADATA_CACHE=1` 显式注册 `ModelRunner.forward` 的 AROUND Hook。
+仅对非 draft、非 speculative 的 extend 前向建立 ContextVar 作用域；保留原函数参数、返回值和异常，退出时总是恢复外层作用域。默认不注册此 Hook。
+
+当前固定社区源码在每次前向初始化 KDA metadata，正常 extend 各层只读同一 `query_start_loc` 与 `mamba_cache_indices`；缓存仅复用这些小张量的 CPU 列表，不复用 Q/K/V、SSM 数值或内核工作区。键含张量身份、版本（若可用）、shape、stride、dtype 与 device，持有原张量以避免身份复用，返回独立列表。普通张量原地修改由版本失效；inference tensor 无版本，适用条件是上述前向内只读合同，下次前向一定重新读取。
+
+索引范围、重复 slot、序列长度、dtype、状态布局与 Graph/备用内核检查仍逐次执行。独立调用没有前向作用域时保持原有读取行为。Graph capture、decode、draft 与 speculative 不声明缓存支持；原有 FlashKDA graph 回退保持不变。
+
+CPU 回归覆盖同一前向复用、参数透传、普通张量原地失效、inference tensor 跨前向更新、嵌套作用域、异常恢复、decode/draft 关闭和显式注册。保留的修改前源码在新增注册测试中按预期失败；修改后 FlashKDA/MQA/sparse 三组共32项通过。实际 Torch2.13 测试退出码为0，vendor weakref 清理期的两条 ValueError 原件保留。
+
+32rank gfx938/64CU、TP8/CP8/EP8/PP4、原生 DeepEP normal MNVL 的候选 `candidate-deepep-19-metadata_cache1` 在全部32个 worker 记录作用域命中，64和131072输入的单请求/并发四格共六条完整已知答案检查通过。新128K Prof 的 PP0/TP0 int32偏移主机复制576→16，slot索引复制288→16；相关 CPU inclusive 时间包含 GPU 等待，不能作为端到端节省。Profiler-off 128K/1 C1、前缀cache关闭的单次输入吞吐12638.70 token/s，上一实测最佳12468.44 token/s（+1.37%），初始基线11098.56 token/s（+13.88%）。当前模型冒烟、精度/性能门禁及优化后32rank原始 Prof 已保留在 `/public/home/yangyn1/work_log/1122`；不代表全数据集质量、Graph资格或统计显著性。七小时窗口实际完成7小时40秒后，128K/1、cache0最终并发1/2/4/8/16分别12633.23/13527.23/14012.92/14240.87/14407.73输入token/s，31/31请求成功；相对新增禁止NCCL EP指导之前的历史初始基线分别+13.83%/+7.58%/+4.29%/+2.15%/+1.47%。窗口内全程原生DeepEP。关闭/恢复开启元数据缓存的各三次C1中位数12499.25/12644.08 token/s（+1.16%），六条精度再次通过；最后12次C1确认中位12636.46 token/s。最终五档之后另采32K/1全32rank Prof，原件与精度、重复、详细适用边界均保留在私有任务报告。
+
+
+## 2026-11-23 Kimi K3.1 DCP 缓存审计
+
+用途：在既有 Day0 启动链下审计 TP/EP/DCP 的实际物理缓存，不替换上游 DCP 算法。
+设置 `HCU_KIMI31_KV_INVENTORY` 为显式输出目录，在每个 target/draft runner 的
+`alloc_memory_pool` 后保存 rank、DCP rank、分配器页尺寸、容量、缓存张量 shape/dtype、
+去重的 storage 字节及当时 Torch allocated/reserved 字节。未设置时不注册审计 Hook。
+该时点在 CUDA graph 和后续工作区分配之前；数据不是服务峰值显存，也不是有效 KV 内容证明。
+使用现有 hcu-plugin-dev 入口；输出目录由调用者管理，记录包含当前部署的设备与容量。
+
+变更范围为 `kimi31_dcp.py`、Day0 注册入口及两项 CPU 回归；保留本次输入中已有未提交的 CP 适配。
+CPU 验证已在目标容器执行：`tests/runtime/kimi31_dcp_cpu.py` 两项通过，
+覆盖共享存储去重、循环引用、target/draft 分文件和关闭时无副作用。
+GPU/服务 DCP 容量与请求验证仍在任务工作区进行，以最终报告为准；本段不宣称完整精度通过。
+
+本轮还提供显式 `HCU_KIMI31_DCP_FAKE=1` 的合成 decode 准入兼容：仅 HCU、
+Kimi K3.1、DCP>1、decode、fake 同时成立时，供模型 provider 校验的只读视图
+将传输表示为 Mooncake；实际 ServerArgs、运行时和传输后端保持 fake。
+其他 DCP/DSpark/top-k 校验继续由原 provider 执行。
+该开关不证明真实 PD 传输或语义质量，不能用于声明 Mooncake 已验证。
+新增 CPU 回归覆盖视图与原配置分离及 DCP1/prefill/其他传输不适用边界。
+
+DCP 跨节点候选交换的 NVLink clique 探测在当前上游会无条件初始化 NVML，
+导致 HCU 的 `pynvml` 名称缺失；Day0 的 DCP 兼容 Hook 在 HIP 环境明确返回
+无 NVLink clique，沿用上游 NCCL 候选交换。CUDA 环境保留原探测。
+对应 CPU 回归检查 HIP 不调用 NVML 及 CUDA 继续委托原函数。
+
+DSpark 的 Triton 草稿在真实 HIP 上执行DCP1并复制KV；全局CUDA平台兼容
+可能掩盖此局部语义，从而进入不支持滑窗的DCP extend。Day0在
+`attention_dcp_size`及backend/planner导入别名处仅恢复DSpark Triton draft
+的HIP执行宽度判定，target不受影响。回归覆盖draft/target、非DSpark及CUDA委托。
+
+最终专项实测：TP16/EP16/DCP16、FP8 KV、DSpark静态verify、fake PD，
+64/C1及131072/C1/C2/C16各32输出，两组DCP1/DCP16均20/20请求通过，
+16target/16draft库存齐全；target池逻辑容量1572096→16732160，KDA状态未分片，
+draft采用HIP复制执行宽度1。此结论仅覆盖合成decode/布局/容量，
+不证明真实PD传输、上下文语义精度或吞吐收益；KDA16状态槽仍限制并发。
+CPU专项5项、显式绑定adapter相关26项通过（28项条件跳过）。
+导览执行生成/快照检查，未进行本轮浏览器截图验收。
