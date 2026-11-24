@@ -83,6 +83,14 @@ def register_hooks():
         from hcu_sglang import kimi31_hisparse_dspark
 
         kimi31_hisparse_dspark.register_hooks()
+        HookRegistry.register(
+            "sglang.srt.managers.tp_worker.TpModelWorker.get_worker_info",
+            around_hisparse_decode_request_limit, HookType.AROUND,
+        )
+        HookRegistry.register(
+            "sglang.srt.mem_cache.allocator.hisparse.HiSparseTokenToKVPoolAllocator.max_new_tokens_for_memory",
+            around_hisparse_decode_generation_budget, HookType.AROUND,
+        )
 
     HookRegistry.register(
         "sglang.srt.hf_transformers.config.HfModelConfigParser.parse",
@@ -92,3 +100,33 @@ def register_hooks():
         "sglang.srt.speculative.dspark_components.dspark_worker_v2.DSparkWorkerV2._draft_context",
         around_draft_context, HookType.AROUND,
     )
+
+
+def around_hisparse_decode_request_limit(original, worker):
+    from sglang.srt.runtime_context import get_disagg
+
+    info = original(worker)
+    runner = worker.model_runner
+    if not runner.enable_hisparse or get_disagg().disaggregation_mode != "decode":
+        return info
+    host_backed_capacity = getattr(runner.token_to_kv_pool_allocator, "size_full", None)
+    if not host_backed_capacity:
+        return info
+    request_table_limit = runner.req_to_token_pool.max_context_len
+    max_request = min(worker.model_config.context_len, request_table_limit, host_backed_capacity) - 1
+    if max_request <= info[4]:
+        return info
+    reserved = info[4] - info[5]
+    logging.getLogger(__name__).info(
+        "HiSparse Decode request limit uses full KV pool: %d -> %d; logical rows=%d, request table=%d",
+        info[5], max_request - reserved, host_backed_capacity, request_table_limit,
+    )
+    return (*info[:4], max_request, max_request - reserved, *info[6:])
+
+
+def around_hisparse_decode_generation_budget(original, allocator, input_tokens, max_new_tokens, **kwargs):
+    from sglang.srt.runtime_context import get_disagg
+
+    if get_disagg().disaggregation_mode == "decode":
+        kwargs["token_capacity"] = allocator.size_full
+    return original(allocator, input_tokens, max_new_tokens, **kwargs)

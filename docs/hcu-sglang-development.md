@@ -3105,3 +3105,10 @@ draft采用HIP复制执行宽度1。此结论仅覆盖合成decode/布局/容量
 不证明真实PD传输、上下文语义精度或吞吐收益；KDA16状态槽仍限制并发。
 CPU专项5项、显式绑定adapter相关26项通过（28项条件跳过）。
 导览执行生成/快照检查，未进行本轮浏览器截图验收。
+
+
+## Kimi K3.1 HiSparse Decode 1M 上下文（2026-11-24）
+
+在 [Kimi DSpark 插件](../hcu_sglang/kimi31_dspark.py) 注册两处 HiSparse Decode Hook。请求长度以模型上下文、请求映射表与逻辑 KV 池容量中最小值为上限，并保留原有预留 token。生成预算使用逻辑池容量，让分配器按原有规则计算剩余输出额度。
+
+本次提交的 CPU 检查覆盖两处 Hook、容量边界和 Prefill 回退。此前独立插件副本在 TP32、EP32、Attention DP4、Fake Prefill 下完成了 8 路并行 Decode，每路输入 1,048,576 token，输出 1,024 token。本次提交未重复运行 GPU 压测。

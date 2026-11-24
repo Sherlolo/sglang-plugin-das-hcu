@@ -714,6 +714,18 @@
     }
   },
   "conditional_profiles": {
+    "kimi31-hisparse-dspark-long-context": {
+      "source_sha": "a36218c145b80fdcebf6cbb328721d87cbfa1de6",
+      "environment": {
+        "HCU_KIMI31_DAY0": "1",
+        "HCU_KIMI31_HISPARSE_DSPARK": "1"
+      },
+      "additional_hook_targets": [
+        "sglang.srt.managers.tp_worker.TpModelWorker.get_worker_info",
+        "sglang.srt.mem_cache.allocator.hisparse.HiSparseTokenToKVPoolAllocator.max_new_tokens_for_memory"
+      ],
+      "validation": "CPU hook checks for request limits, generation budget, and prefill fallback"
+    },
     "kimi31-day0-dspark": {
       "source_sha": "6321f714ddd9c5da511b0cfefa0ebabc4277cf36",
       "environment": {
