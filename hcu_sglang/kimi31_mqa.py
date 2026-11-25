@@ -1,11 +1,76 @@
 import logging
 import os
+from contextvars import ContextVar
+from functools import cache
 
 import torch
 
 
 _logged = False
 _logged_prefill = False
+_verify_paged_topk = ContextVar("kimi31_verify_paged_topk", default=False)
+_logged_topk_layouts = set()
+
+
+@cache
+def _verify_lightop_device(device):
+    props = torch.cuda.get_device_properties(device)
+    return (
+        getattr(props, "gcnArchName", "").split(":")[0] == "gfx938"
+        and props.multi_processor_count == 64
+    )
+
+
+def around_verify_paged_topk(original, self, forward_batch, layer_id, q_fp8, weights, metadata):
+    from hcu_sglang.layers.attention.current_dsa.forward_batch_utils import effective_forward_mode
+
+    selected = (
+        effective_forward_mode(forward_batch).is_target_verify()
+        and self.num_init_tokens == 0
+        and self.num_local_tokens == 0
+        and torch.version.hip is not None
+        and q_fp8.is_cuda
+        and _verify_lightop_device(q_fp8.device)
+    )
+    token = _verify_paged_topk.set(selected)
+    try:
+        return original(self, forward_batch, layer_id, q_fp8, weights, metadata)
+    finally:
+        _verify_paged_topk.reset(token)
+
+
+def around_verify_raw_topk(original, self, score, lengths, topk, row_starts=None):
+    if not _verify_paged_topk.get() or not self.is_torch() or row_starts is not None:
+        return original(self, score, lengths, topk, row_starts=row_starts)
+    rows, width = score.shape
+    selected = (
+        topk == 2048
+        and score.dtype == torch.float32
+        and score.is_contiguous()
+        and lengths.numel() == rows
+        and 8 <= rows <= 64
+        and 131072 <= width <= 135168
+    )
+    layout = (rows, width, score.stride(), selected)
+    if layout not in _logged_topk_layouts:
+        _logged_topk_layouts.add(layout)
+        if selected:
+            logging.getLogger(__name__).info(
+                "DSA Verify local Top-k=LightOp (rows=%d, width=%d)", rows, width
+            )
+        else:
+            logging.getLogger(__name__).info(
+                "DSA Verify local Top-k keeps torch (rows=%d, width=%d, stride=%s, k=%d, lengths=%d)",
+                rows, width, score.stride(), topk, lengths.numel(),
+            )
+    if not selected:
+        return original(self, score, lengths, topk, row_starts=row_starts)
+    from hcu_sglang.layers.attention.current_dsa.dsa_topk_backend import lightop_ranked_local_topk
+
+    return lightop_ranked_local_topk(
+        score, lengths, topk,
+        triton_rank=os.environ.get("HCU_KIMI31_VERIFY_LIGHTOP_TRITON_RANK") == "1",
+    )
 
 
 def _supports_ragged_mqa(q, kv, weights, ks, ke):
@@ -108,6 +173,15 @@ def around_paged_mqa(original, self, q, cache, weights, context_lens,
 def register_hooks():
     from sglang.srt.plugins.hook_registry import HookRegistry, HookType
 
+    if os.environ.get("HCU_KIMI31_VERIFY_LIGHTOP_TOPK") == "1":
+        HookRegistry.register(
+            "sglang.srt.layers.attention.dsa.dsa_indexer.Indexer._get_topk_paged",
+            around_verify_paged_topk, HookType.AROUND,
+        )
+        HookRegistry.register(
+            "sglang.srt.layers.attention.dsa.dsa_topk_backend.DSATopKBackend.topk_func",
+            around_verify_raw_topk, HookType.AROUND,
+        )
     if os.environ.get('HCU_KIMI31_DEEPGEMM_MQA') == '1':
         HookRegistry.register(
             'sglang.srt.layers.attention.dsa.dsa_indexer.Indexer._paged_mqa_logits',

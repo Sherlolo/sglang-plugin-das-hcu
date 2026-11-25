@@ -300,6 +300,32 @@ class DSATopKBackend(Enum):
         raise RuntimeError(f"Unsupported {self = } for SGLANG_DSA_FUSE_TOPK.")
 
 
+def lightop_ranked_local_topk(
+    score: torch.Tensor, lengths: torch.Tensor, topk: int, *, triton_rank: bool = False
+) -> torch.Tensor:
+    from lightop import fast_topk_transform_ragged_fused
+
+    lengths = lengths.reshape(-1).to(dtype=torch.int32).contiguous()
+    indices = fast_topk_transform_ragged_fused(
+        score=score,
+        lengths=lengths,
+        topk_indices_offset=torch.zeros_like(lengths),
+        topk=topk,
+        row_starts=None,
+    )
+    if triton_rank and score.is_contiguous() and indices.is_contiguous() and topk == 2048:
+        from hcu_sglang.layers.attention.current_dsa.lightop_topk_rank import rank_selected
+
+        return rank_selected(score, indices)
+    # A zero base offset gives the request-local indices HiSparse consumes.
+    # Rank those indices by score and preserve the -1 sentinel for masked slots.
+    values = score.gather(1, indices.clamp_min(0).long())
+    values = values.masked_fill(indices < 0, float("-inf"))
+    values, order = values.sort(dim=-1, descending=True)
+    ranked = indices.gather(1, order)
+    return ranked.masked_fill(values == float("-inf"), -1)
+
+
 def _topk_unfused(
     score: torch.Tensor,
     lengths: torch.Tensor,

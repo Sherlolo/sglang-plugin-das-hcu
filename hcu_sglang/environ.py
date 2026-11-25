@@ -46,6 +46,7 @@ _ENV_SPECS: dict[str, tuple[type, Any]] = {
     "SGLANG_DSA_HCU_USE_TRITON_PAGED_MQA": (EnvBool, False),
     "SGLANG_DSA_KPOOL_AITER_TOPK": (EnvBool, False),
     "SGLANG_DSA_KPOOL_LIGHTOP_TOPK": (EnvBool, False),
+    "HCU_KIMI31_VERIFY_LIGHTOP_TOPK": (EnvBool, False),
     "SGLANG_HCU_TOPK_V2_PAGED": (EnvBool, False),
     'SGLANG_DSV4_COMPRESS_RLC': (EnvBool, False),
     'SGLANG_DSV4_FP4_LOGITS_BUDGET_MB': (EnvInt, 2048),

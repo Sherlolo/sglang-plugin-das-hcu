@@ -21,6 +21,7 @@ from sglang.srt.utils import get_bool_env_var
 
 _use_w4a8_contiguous_hipc = get_bool_env_var("SGLANG_USE_W4A8_CONTIGUOUS_HIPC")
 _use_w4a8_masked_hipc = get_bool_env_var("SGLANG_USE_W4A8_MASKED_HIPC")
+_tune_kimi31_ep32_gate_up = get_bool_env_var("HCU_KIMI31_EP32_W4A8_GATE_UP_PM6")
 
 
 def forward_contiguous(self, dispatch_output):
@@ -281,8 +282,18 @@ def _masked_hipc(
 ) -> None:
     from deepgemm import m_grouped_w4a8_gemm_nt_masked_hipc
 
+    config = None
+    if (
+        _tune_kimi31_ep32_gate_up
+        and tuple(a0.shape) == (28, 2048, 3584)
+        and d.shape[-1] == 6144
+        and expected_m_per_group == 10
+    ):
+        props = torch.cuda.get_device_properties(a0.device)
+        if props.gcnArchName.split(":")[0] == "gfx938" and props.multi_processor_count == 64:
+            config = {"MODE": 1162, "PERSISTENT_MULTIPLIER": 6}
     m_grouped_w4a8_gemm_nt_masked_hipc(
-        (a0, a1), (b0, b1), d, masked_m, expected_m_per_group
+        (a0, a1), (b0, b1), d, masked_m, expected_m_per_group, config
     )
 
 

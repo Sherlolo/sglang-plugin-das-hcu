@@ -3112,3 +3112,55 @@ CPU专项5项、显式绑定adapter相关26项通过（28项条件跳过）。
 在 [Kimi DSpark 插件](../hcu_sglang/kimi31_dspark.py) 注册两处 HiSparse Decode Hook。请求长度以模型上下文、请求映射表与逻辑 KV 池容量中最小值为上限，并保留原有预留 token。生成预算使用逻辑池容量，让分配器按原有规则计算剩余输出额度。
 
 本次提交的 CPU 检查覆盖两处 Hook、容量边界和 Prefill 回退。此前独立插件副本在 TP32、EP32、Attention DP4、Fake Prefill 下完成了 8 路并行 Decode，每路输入 1,048,576 token，输出 1,024 token。本次提交未重复运行 GPU 压测。
+
+
+## Kimi K3.1 Verify Router LightOp 对照（2026-11-25）
+
+通过 `HCU_KIMI31_ROUTER_LIGHTOP=1` 启用 Day0 Router Hook，仅覆盖原生 SIMT 路径允许的 token 行数、N=896、K=7168，并保留 FP32 输出。当前 SGLang 的原生 Router 阈值为 16 行。其他形状和确定性推理沿用原有分发。
+
+gfx938 上以四层真实 Router 权重、合成 BF16 输入验证 Full Graph replay。M=64 的 FP32 logits 最大绝对误差为 9.54e-6，256 行的 Top-16 专家集合均一致。整机结果单独记录。
+
+按原生阈值补测 M=16，使用相同四层权重、交错进行八轮 Graph replay。SIMT 和 LightOp 的中位延迟分别为 532.65 µs 和 38.30 µs。加入权重检查点的路由偏置并运行 sigmoid Top-16 后，64 行专家集合均一致。FP32 logits 和路由权重的最大绝对误差分别为 9.54e-6 和 1.86e-8。
+
+
+16 卡 TP16、EP16、Attention DP2 的目标 Verify Graph 抓取了 1、2、4、8 路规格。8 路规格有 64 个 DP 内逻辑 token 行，序列并行后每个 rank 传给 Router GEMM 的 M=8。此形状下，独立 Graph replay 的 SIMT 和 LightOp 中位延迟分别为 169.20 µs 和 36.69 µs，32 行 Top-16 专家集合全部一致，FP32 logits 最大绝对误差为 9.54e-6。此次使用 `lightop.gemm(..., out_dtype=torch.float32)`，直接匹配 Kimi 的 N=896、K=7168。
+
+16 卡整机 Fake Prefill 压测中，16 个并发请求按 8/8 分配，设备 KV 池限制为每个 DP 实际同时运行 7 路。固定输入 6,144 token、输出 192 token，预热后测量 3 轮，无 profiler。替换前后平均 TPOT 的三轮中位数为 35.61 和 33.51 ms/token，输出吞吐为 250.63 和 260.09 token/s。单算子 trace 记录了 `gemm_nt_fp16<c10::BFloat16, float, 4>`，整机 trace 记录了 Graph replay 和其他设备算子，尚待取得路由算子记录。真实生成、DSpark 接受率和 HumanEval 对照仍在进行。
+
+真实生成对照使用 DeepEP `low_latency` 和 512 token 的 Prefill 分块。初次 HumanEval 在 DSpark 的采样验证阶段遇到 HCU FlashInfer 兼容层缺少 Top-P 概率归一化。Adapter 现通过上游 HIP Triton Renorm 实现提供 Top-P 和 Top-K 归一化，并支持采样调用方的 `is_deterministic` 参数。gfx938 检查已覆盖归一化边界的概率并列以及 DSpark Top-40/Top-P 0.95 的目标概率生成。完整 HumanEval A/B 按原采样配置重跑。
+
+采用原采样配置的并发 HumanEval 重跑通过了 Top-P 路径，随后在非重叠调度下出现 DSpark 批次过滤越界。合并后如果只有一侧含 Next-KV 长度缓存，缓存只覆盖部分请求。Kimi DSpark 插件对这种合并丢弃不完整缓存，保留请求顺序和模型状态。下一次 Decode 准备会按合并后的请求重新计算长度。回归检查覆盖两种合并方向、过滤保留第三行，以及两侧都有缓存时的拼接。首次重跑保留 16 并发和原采样设置。该轮首批请求停滞，16 个 rank 的 Python 调用栈均停在 Scheduler 将新序列长度拷回 CPU 的同步点，尚无设备侧证据定位具体算子。后续精度 A/B 使用历史评测脚本的 8 并发，保留 164 道题、生成上限、采样参数和 seed。16 卡算子替换的性能 A/B 仍以此前独立测得的 16 并发为准。
+
+8 并发的首轮 LightOp 评测在 22/164 题后停滞。停滞前两个 Attention DP 的 Decode 批量分别为 2 和 5，其中一个 DP 刚完成新的 Prefill。16 个 rank 均在等待设备结果，原路由的同配置对照已越过这一进度。早期候选在 Prefill 也会命中小批量 LightOp。后续候选由 Kimi K3.1 模型入口传递当前 ForwardMode，开关仅作用于 Decode 和 Target Verify。CPU 检查覆盖当前 SGLang 的所有 ForwardMode 和异常恢复；整机精度与 Verify trace 待复测。
+
+仅在 Decode 和 Target Verify 切换路由后，同一个 8 并发 HumanEval 配方复测完成。原路由和 LightOp 均有 164 条正常结束响应，pass@1 均为 163/164，唯一未通过的题均为 HumanEval/134。另测 16 条真实 DSpark 请求，平均接受长度从 4.8995 升到 4.9789，真实接受率从 56.1176% 升到 57.3281%。
+
+16 卡 Verify trace 的设备池容量单独从 131,072 增至 135,168，使实际每个 Attention DP 可运行完整 8 路。TP0 的三次 replay 都处于 `VERIFY bs=8 g_sq=64`。HIP Graph 节点枚举为该 ShapeKey 识别到 92 个 LightOp BF16→FP32 路由内核节点和 0 个已识别原生 SIMT 路由节点。Kineto 的 GPU kernel 事件缺失路由符号，借助 CPU replay 标记把实际 `hipGraphLaunch` 与所枚举的节点关联。计时 A/B 使用此前独立无采集结果。插件和 Adapter 通过工作区导入，SGLang 主仓仍在 6321f714。
+
+32 卡 C64 采用与历史 128K HiSparse 基线一致的逻辑 Draft KV 池接入。通过 `HCU_KIMI31_HISPARSE_LOGICAL_DRAFT=1` 启用历史池配置 hook。16 卡验证配置保留原默认值。32 卡启动参数已静态核对，GPU 复测待执行。
+
+### 高频 GEMM 单卡对照
+
+复用 TP16 Attention DP2 捕获的高频 BF16 投影形状，保持已有 hipBLASLt 与 rocBLAS 调优文件，对照 `torch.mm` 与 LightOp。14 个实际捕获形状的 Graph replay 均由当前 BLAS 路径更快，保留该路径。需要等 32 卡服务就绪后，以 TP32 Attention DP8 的实际 BLAS 形状重新评估。
+
+W4A8 掩码 GEMM 对照使用 64 CU gfx938，按 EP32 复现 28 个本地专家、2048 行容量和预期活跃行数 10。使用合成权重、激活和两种路由行数分布。Gate/Up 使用 MODE 1162、persistent multiplier 6，在混合分布下由 190.38 降至 179.09 µs，平衡分布下由 176.70 降至 176.35 µs。对照中的有效行输出逐元素一致。Down 保留厂商选择。实验开关 `HCU_KIMI31_EP32_W4A8_GATE_UP_PM6` 仅匹配上述形状和架构，默认关闭，由 32 卡不带 profiler 的对照决定是否保留。
+
+### 2026-11-25 Kimi K3.1 Verify 的 128K DSA Top-k
+
+32 卡 TP32、EP32、Attention DP8、C64 的历史 Verify trace 每 rank 每步中位数有 96 次 PyTorch radix 计数和 24 次 gather，两组内核分别累计 21.48 ms 和 3.36 ms。launch 保留 torch Top-k 和未融合结果。HiSparse 的 Verify 需要请求内的 token 下标，不能直接传物理页地址。
+
+实验开关为 `HCU_KIMI31_VERIFY_LIGHTOP_TOPK=1`，默认关闭。只在 gfx938 64 CU 的 Target Verify 接管指定的 128K paged logits 形状，将 LightOp ragged transform 的 base offset 设为 0，并对候选 K 项按分数排序、处理 -1 padding。保留逻辑下标和其他形状的 torch 路径。单卡 CUDA Graph 的 64 行 x 133120、K=2048 合成测试中，重排版本由 847.37 降到 430.60 µs。等分合成测试的索引集合、分数集合一致，等分项的顺序可能不同。此结果只覆盖算子级正确性和耗时，完整服务的 HiSparse 行为、精度和 TPOT 待验证。
+
+Kimi Day0 通过独立的注册函数启动，通用 DSA indexer 替换在此模式下不生效。Top-k 候选在 Day0 的原生 paged indexer 上标记 Target Verify，再接入 torch 后端的 raw Top-k 入口。逻辑下标和未适配形状的回退路径保持一致。首次整机 A/B 两轮均成功生成，但 Graph 未命中 LightOp，性能结果仅作为同路径复测记录。
+
+Day0 接入复测使用 16 卡 TP16、EP16、Attention DP2，固定 131072 输入、1024 输出、并发 2、Fake Prefill、Full CUDA Graph 和模拟接受长度 5。两组均有两轮正式结果，各完成 4 个请求。每路 DP 的 batch 1 Graph 命中 8 × 133248 的 LightOp Top-k。TPOT 从 23.3113 降到 22.6124 ms/token（降 3.00%），输出吞吐从 84.1587 升到 86.7264 tok/s（升 3.05%）。Target Verify 的 64 × 133248 形状也在启动捕获日志中确认。32 卡 C64 整机降幅待验证。
+
+LightOp 先选出请求内的 K 项。候选开关 `HCU_KIMI31_VERIFY_LIGHTOP_TRITON_RANK=1` 用一个 Triton kernel 读取并排序这 2048 项，默认继续使用 PyTorch 对选中项排序。在 64 CU gfx938、133248 列的单卡 Graph 中，8 行由 169.93 降到 123.63 µs，64 行由 441.47 降到 384.15 µs。等分样本也验证了索引集合、降序分数和 -1 padding 一致。整机收益和真实精度待验证。
+
+真实 Prefill 精度对照保持 16 卡 TP16、EP16、Attention DP2 和 Full CUDA Graph，关闭接受长度模拟。PyTorch Top-k 的 HumanEval 为 163/164，LightOp 为 164/164，LightOp 没有新增失败题。16 个固定 DSpark 请求均完成，平均接受长度由 4.9073 降为 4.5782，draft 接受率由 56.09% 降为 51.61%。这是单轮接受率对照。3.00% 的整机 TPOT 降幅来自固定接受长度的 Fake Prefill，真实流量的净收益待验证。独立 128K 真实请求的复测将 KV 池从 135168 提到 163840，保留 HiSparse speculative 工作区余量。
+
+### 32 卡 144 GiB Decode 复测
+
+沿用历史 TP32、EP32、Attention DP8 和每组 15 路配置。每个 DP 的 KV 容量为 1,985,536 token，Full CUDA Graph 批量为 1、2、4、8、12、15。关闭 HiSparse，使用 128K 输入、1024 输出的 Fake Prefill，DSpark 模拟接受长度固定为 5。仅启用 Router LightOp 和 DSA Verify Top-k LightOp，保留原有 BLAS 调优。Graph 捕获在 8 个节点上均观察到 Router M=16 和 DSA 64 行走 LightOp。DSA 96 行和 120 行继续走 PyTorch。
+
+同一汇总口径下，与历史 144 GiB 记录相比，C32 平均 TPOT 从 37.80 降至 32.01 ms/token，C64 从 55.20 降至 40.77 ms/token，C64 输出吞吐从 1,088.37 升至 1,434.67 token/s。C80 与 C96 的 TPOT 分别上升 0.97% 和 0.64%。11 档共 551 个正式请求均成功返回 1,024 token。低并发档采用 JIT 预热后的复测结果，峰值单卡显存为 134.76 GiB。该结果对应无 HiSparse 的历史配置，带 HiSparse 的 32 卡同配置 A/B 仍待复测。

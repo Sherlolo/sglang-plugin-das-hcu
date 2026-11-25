@@ -714,6 +714,29 @@
     }
   },
   "conditional_profiles": {
+    "kimi31-hisparse-logical-draft": {
+      "environment": {
+        "HCU_KIMI31_DAY0": "1",
+        "HCU_KIMI31_HISPARSE_DSPARK": "1",
+        "HCU_KIMI31_HISPARSE_LOGICAL_DRAFT": "1"
+      },
+      "additional_hook_targets": [
+        "sglang.srt.mem_cache.kv_cache_configurator.KVCacheConfigurator.__post_init__",
+        "sglang.srt.mem_cache.kv_cache_configurator.KVCacheConfigurator._derive_pool_sizes"
+      ],
+      "validation": "Historical DP8 C64 HiSparse allocation wiring ported; this branch still requires GPU validation"
+    },
+    "kimi31-lightop-router": {
+      "source_sha": "51b7f5cd3d1340396b43304491eaa3272bc097d8",
+      "environment": {
+        "HCU_KIMI31_DAY0": "1",
+        "HCU_KIMI31_ROUTER_LIGHTOP": "1"
+      },
+      "additional_hook_targets": [
+        "sglang.srt.models.deepseek_v2.MoEGate.forward"
+      ],
+      "validation": "gfx938 Graph replay, four Kimi K3.1 checkpoint router weights, FP32 logits and Top-16 expert set checks"
+    },
     "kimi31-hisparse-dspark-long-context": {
       "source_sha": "a36218c145b80fdcebf6cbb328721d87cbfa1de6",
       "environment": {

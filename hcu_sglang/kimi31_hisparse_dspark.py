@@ -124,6 +124,12 @@ def commit_verify(self, *, batch, seq_lens_pre_verify, seq_lens_post_verify, com
 
 
 def register_hooks():
+    import os
+
+    if os.environ.get("HCU_KIMI31_HISPARSE_LOGICAL_DRAFT") == "1":
+        from hcu_sglang.kimi31_hisparse_draft_pool import register_hooks as register_draft_pool
+
+        register_draft_pool()
     from sglang.srt.arg_groups import hisparse_hook
     from sglang.srt.plugins.hook_registry import HookRegistry, HookType
 

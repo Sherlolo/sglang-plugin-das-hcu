@@ -2,8 +2,12 @@ import json
 import logging
 import os
 from contextlib import contextmanager
+from contextvars import ContextVar
+from functools import lru_cache
 from pathlib import Path
 
+
+_router_lightop_decode = ContextVar("kimi31_router_lightop_decode", default=False)
 
 def normalize_speculator(values):
     from transformers import Qwen3Config
@@ -79,6 +83,25 @@ def register_hooks():
     from sglang.srt.plugins.hook_registry import HookRegistry, HookType
 
     register_dp_deepep()
+    HookRegistry.register(
+        "sglang.srt.speculative.dflash_info_v2.DFlashDraftInputV2.merge_batch",
+        around_draft_merge, HookType.AROUND,
+    )
+    if os.environ.get("HCU_KIMI31_ROUTER_GRAPH_DUMP_DIR"):
+        from hcu_sglang import kimi31_router_graph_diag
+
+        backend = "sglang.srt.model_executor.runner_backend.full_cuda_graph_backend.FullCudaGraphBackend"
+        HookRegistry.register(f"{backend}.capture_one", kimi31_router_graph_diag.capture_one, HookType.AROUND)
+        HookRegistry.register(f"{backend}.replay", kimi31_router_graph_diag.replay, HookType.AROUND)
+    if os.environ.get("HCU_KIMI31_ROUTER_LIGHTOP") == "1":
+        HookRegistry.register(
+            "sglang.srt.models.kimi_k3.KimiK31ForConditionalGeneration.forward",
+            around_lightop_router_mode, HookType.AROUND,
+        )
+        HookRegistry.register(
+            "sglang.srt.models.deepseek_v2.MoEGate.forward",
+            around_lightop_router, HookType.AROUND,
+        )
     if os.environ.get("HCU_KIMI31_HISPARSE_DSPARK") == "1":
         from hcu_sglang import kimi31_hisparse_dspark
 
@@ -100,6 +123,23 @@ def register_hooks():
         "sglang.srt.speculative.dspark_components.dspark_worker_v2.DSparkWorkerV2._draft_context",
         around_draft_context, HookType.AROUND,
     )
+
+
+def around_draft_merge(original, draft, incoming):
+    from copy import copy
+    from sglang.srt.runtime_context import get_schedule
+
+    if get_schedule().disable_overlap_schedule:
+        if draft.nxt_kv_lens_cpu is None and incoming.nxt_kv_lens_cpu is not None:
+            # A cache covering only one side cannot index every merged request.
+            # Decode preparation rebuilds both lengths after filtering the merged batch.
+            incoming = copy(incoming)
+            incoming.nxt_kv_lens_cpu = None
+            incoming.nxt_kv_lens_sum = None
+        elif draft.nxt_kv_lens_cpu is not None and incoming.nxt_kv_lens_cpu is None:
+            draft.nxt_kv_lens_cpu = None
+            draft.nxt_kv_lens_sum = None
+    return original(draft, incoming)
 
 
 def around_hisparse_decode_request_limit(original, worker):
@@ -130,3 +170,48 @@ def around_hisparse_decode_generation_budget(original, allocator, input_tokens, 
     if get_disagg().disaggregation_mode == "decode":
         kwargs["token_capacity"] = allocator.size_full
     return original(allocator, input_tokens, max_new_tokens, **kwargs)
+
+
+def around_lightop_router_mode(original, model, input_ids, positions, forward_batch, *args, **kwargs):
+    mode = forward_batch.forward_mode
+    scope = _router_lightop_decode.set(mode.is_target_verify() or mode.is_decode())
+    try:
+        return original(model, input_ids, positions, forward_batch, *args, **kwargs)
+    finally:
+        _router_lightop_decode.reset(scope)
+
+
+def around_lightop_router(original, gate, hidden_states, *args, **kwargs):
+    if not _router_lightop_decode.get():
+        return original(gate, hidden_states, *args, **kwargs)
+
+    import torch
+    from sglang.srt.runtime_context import get_exec
+
+    weight = gate.weight
+    if (
+        hidden_states.ndim != 2
+        or hidden_states.shape[1] != 7168
+        or not 0 < hidden_states.shape[0] <= gate.tiny_router_gemm_max_tokens
+        or weight.shape != (896, 7168)
+        or hidden_states.dtype != torch.bfloat16
+        or weight.dtype != torch.bfloat16
+        or not hidden_states.is_cuda
+        or not hidden_states.is_contiguous()
+        or not weight.is_contiguous()
+        or get_exec().deterministic.enable_deterministic_inference
+    ):
+        return original(gate, hidden_states, *args, **kwargs)
+    return _lightop_router_provider(hidden_states.shape[0])(
+        hidden_states, weight, out_dtype=torch.float32,
+    )
+
+
+@lru_cache(maxsize=None)
+def _lightop_router_provider(rows):
+    import lightop
+
+    logging.getLogger(__name__).info(
+        "Kimi31 Router uses LightOp for M=%d N=896 K=7168, BF16 to FP32", rows,
+    )
+    return lightop.gemm
