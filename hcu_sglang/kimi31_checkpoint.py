@@ -43,6 +43,10 @@ def install_checkpoint_loader():
         logging.getLogger(__name__).info("SlimQuant compression_config support enabled for %s", root)
 
     install_weight_loader_shim()
+    from hcu_adapter.slimquant_native import native_dense_enabled
+    if native_dense_enabled():
+        logging.getLogger(__name__).info("Kimi31 checkpoint native dense INT8 enabled; dense scales unchanged, expert scale/16 unchanged")
+        return
     logging.getLogger(__name__).info(
-        'Kimi31 checkpoint: dense W8 weights dequantized to BF16 at load; routed INT4 bytes and native scale/16 preserved for DeepGEMM W4A8'
+        'Kimi31 checkpoint: dense W8 weights dequantized to BF16 at load; routed INT4 bytes and native scale/16 preserved for W4A8 kernels'
     )

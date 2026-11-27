@@ -63,6 +63,11 @@ def around_get_quant_method(original, config, layer, prefix):
     from sglang.srt.utils import get_bool_env_var
 
     if isinstance(layer, LinearBase):
+        from hcu_adapter.slimquant_native import native_dense_module
+        if native_dense_module(prefix):
+            from hcu_sglang.layers.quantization.slimquant_w4a8 import SlimQuantW4A8Int8LinearMethod
+            logging.getLogger(__name__).info("Kimi31 native dense INT8: %s", prefix)
+            return SlimQuantW4A8Int8LinearMethod(config)
         return UnquantizedLinearMethod()
     if (isinstance(layer, DeepEPMoE) and get_moe_runner_backend().is_deep_gemm()
             and get_moe_a2a_backend().is_deepep()):
@@ -122,4 +127,15 @@ def register_hooks():
     HookRegistry.register(
         "sglang.srt.layers.moe.ep_moe.layer.DeepEPMoE.run_moe_core",
         around_run_moe_core, HookType.AROUND,
+    )
+
+
+def register_etp_hooks():
+    from sglang.srt.plugins.hook_registry import HookRegistry, HookType
+    from hcu_sglang.kimi31_checkpoint import install_checkpoint_loader
+
+    install_checkpoint_loader()
+    HookRegistry.register(
+        "hcu_sglang.layers.quantization.slimquant_w4a8_marlin.SlimQuantW4A8Int8MarlinConfig.get_quant_method",
+        around_get_quant_method, HookType.AROUND,
     )

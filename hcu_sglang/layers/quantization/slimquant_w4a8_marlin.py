@@ -297,12 +297,18 @@ def _patch_moe_c_align_non_cub_to_triton() -> None:
     orig = fmc.moe_align_block_size
 
     def moe_align_block_size(topk_ids, block_size, num_experts, expert_map=None):
-        if num_experts in (64, 128, 256, 896) or (
-            num_experts >= 224 and num_experts != 512
+        from hcu_sglang.kimi31_moe_align import (
+            align_hcu_tokens, should_use_lightop_align,
+        )
+
+        if not should_use_lightop_align(topk_ids, num_experts, block_size) and (
+            num_experts in (64, 128, 256, 896)
+            or (num_experts >= 224 and num_experts != 512)
         ):
             return orig(topk_ids, block_size, num_experts, expert_map)
 
         max_num_tokens_padded = topk_ids.numel() + num_experts * (block_size - 1)
+        max_num_tokens_padded = (max_num_tokens_padded + 3) // 4 * 4
         sorted_ids = torch.empty(
             (max_num_tokens_padded,), dtype=torch.int32, device=topk_ids.device
         )
@@ -315,7 +321,8 @@ def _patch_moe_c_align_non_cub_to_triton() -> None:
         )
         sorted_ids.fill_(topk_ids.numel())
         expert_ids.zero_()
-        fmc.moe_align_block_size_triton(
+        align_hcu_tokens(
+            fmc.moe_align_block_size_triton,
             topk_ids,
             num_experts,
             block_size,

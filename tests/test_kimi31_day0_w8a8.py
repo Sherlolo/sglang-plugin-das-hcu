@@ -37,7 +37,11 @@ class Kimi31Day0W8A8Tests(unittest.TestCase):
             hooks[target] = (callback, hook_type)
 
         with (
-            patch.dict(os.environ, {"HCU_KIMI31_DEEPEP": "0"}),
+            patch.dict(os.environ, {
+                "HCU_KIMI31_DEEPEP": "0",
+                "HCU_KIMI31_ETP": "0",
+                "SGLANG_W4A8_TPMOE_BACKEND": "triton",
+            }),
             patch.object(kimi31_day0.HookRegistry, "register", side_effect=record),
             patch.object(kimi31_day0.jit_overlay_loader, "register_hooks"),
             patch.object(kimi31_day0.configs, "register_hooks"),
@@ -48,6 +52,7 @@ class Kimi31Day0W8A8Tests(unittest.TestCase):
             patch.object(compressed_int8, "is_hcu", return_value=True),
         ):
             kimi31_day0.register_hooks()
+            self.assertEqual(os.environ["SGLANG_W4A8_TPMOE_BACKEND"], "triton")
 
         prefix = (
             "sglang.srt.layers.quantization.compressed_tensors.schemes."

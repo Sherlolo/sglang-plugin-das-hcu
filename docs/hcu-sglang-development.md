@@ -3164,3 +3164,48 @@ LightOp 先选出请求内的 K 项。候选开关 `HCU_KIMI31_VERIFY_LIGHTOP_TR
 沿用历史 TP32、EP32、Attention DP8 和每组 15 路配置。每个 DP 的 KV 容量为 1,985,536 token，Full CUDA Graph 批量为 1、2、4、8、12、15。关闭 HiSparse，使用 128K 输入、1024 输出的 Fake Prefill，DSpark 模拟接受长度固定为 5。仅启用 Router LightOp 和 DSA Verify Top-k LightOp，保留原有 BLAS 调优。Graph 捕获在 8 个节点上均观察到 Router M=16 和 DSA 64 行走 LightOp。DSA 96 行和 120 行继续走 PyTorch。
 
 同一汇总口径下，与历史 144 GiB 记录相比，C32 平均 TPOT 从 37.80 降至 32.01 ms/token，C64 从 55.20 降至 40.77 ms/token，C64 输出吞吐从 1,088.37 升至 1,434.67 token/s。C80 与 C96 的 TPOT 分别上升 0.97% 和 0.64%。11 档共 551 个正式请求均成功返回 1,024 token。低并发档采用 JIT 预热后的复测结果，峰值单卡显存为 134.76 GiB。该结果对应无 HiSparse 的历史配置，带 HiSparse 的 32 卡同配置 A/B 仍待复测。
+
+## Kimi K3.1 EP2 与 ETP8 组合适配（2026-11-25）
+
+本轮使用整体 TP16、Attention DP2/TP8/DCP8、MoE EP2/ETP8。插件通过 `HCU_KIMI31_ETP=1` 注册 ModelSlim checkpoint 加载和 dense W8 转 BF16 的量化选择 Hook，routed INT4 保持原生打包及 scale/16。ETP 路径使用 `none` dispatcher 和已有 W4A8 Triton MoE，Kimi day0 初始化通过 `setdefault` 保留显式 `SGLANG_W4A8_TPMOE_BACKEND=triton`。SGLang 源码保持只读。
+
+修改涉及 `kimi31_day0.py`、`kimi31_ep_moe.py`、`kimi31_checkpoint.py` 和已有 day0 测试。未开启 ETP 开关时，沿用原有接线；DeepEP 的注册仍由独立开关控制。标准路径使用模型原生 shared expert TP，不能沿用 all-to-all 路径专用的 `shared-experts-tp-size` 参数。
+
+本轮在 HCU 上验证 W4A8 SiTU 算子，hidden=3584、每分片 intermediate=384。两专家探针与逐专家参考最大绝对误差为0，448专家探针最大绝对误差约7.63e-6，remote-only行输出为0。现有 day0 两项测试通过，包含显式 Triton 选择不被覆盖的断言。
+
+端到端服务在16张gfx938 HCU卡上完成6个真实文本请求检查，覆盖算术、中英文、字段提取、排序及2436-token输入，6/6通过。候选使用8192上下文、eager、真实standalone prefill/decode，不启用投机。结构门禁通过。控制机全量单测219项中出现81个失败、13个错误、33项跳过，与未修改基线的失败测试标签完全一致，涉及缺少Torch、参考源码路径和历史快照不匹配。容量、图执行和完整精度评测尚未验收。
+
+### ETP 修改同步（2026-11-26）
+
+将基于 plugin `51b7f5cd3d1340396b43304491eaa3272bc097d8` 的四个代码/测试文件差异合入 `87cf309091b37205d7390d112a5b4b838d217176` 工作树，保留目标已有 LightOp router/Top-k 提交和开发记录。adapter 来源 `e4fc00c1a579db0c6f5953047c7e07556b439584` 没有未提交差异，目标 `b102ee4e7007eda2f085b6e819e4d5e4a1c3967e` 已包含该版本及后续概率归一化修复，无需覆盖。
+
+后续 AITER 选择通过显式 `SGLANG_W4A8_TPMOE_BACKEND=aiter` 生效，沿用这里同步的 ETP 接线，无需新增源码差异。上述 Triton 服务验证是此前阶段的历史证据，不代表此次同步的目标提交组合已经完成端到端验收。
+
+此次同步在容器内显式绑定目标 adapter/plugin 和原 SGLang 后，day0 两项测试通过，退出码0；本机因缺少运行时依赖跳过这两项。结构门禁和导览快照检查通过。容器导入时仍有 adapter 上游契约漂移提示，退出清理仍有 Torch weakref 提示，保留原日志，不将定向测试通过解释为整个运行时兼容。未重跑全量测试、GPU 算子性能或模型服务验收；导览仅更新内容快照，未进行浏览器渲染验收。
+
+
+## 2026-11-26 Kimi K3.1 DAS 融合与后端接入
+
+用途：在不修改 SGLang 源码的前提下，将选定 DAS 优化接入 Day-0 plugin 与 adapter 组合。目标为 TP16 / attention DP2 / EP2 / ETP8；性能验证范围按请求限制为 128k 输入、并发 4/8/16，不扩展完整性能矩阵。
+
+### 实现范围
+
+- plugin `kimi31_fusions.py` 经 Day-0 注册 SiTU+INT8、latent RMS+INT8、packed MLA front 与 attention residual。预量化结果只交给同一投影的真实 quant consumer，保留 RowParallel 的通信；物理 HCU gate 避免 CUDA 平台语义阻断 HIP residual 分支。
+- adapter `slimquant_native.py` 按显式 ModelSlim `w8a8_include` 提供可选原生 dense INT8 载入，plugin 选择对应 INT8 Linear。默认行为不变。KDA full-rank gate 的 q/k/v/g 混合合并投影不能整体量化时，源张量和消费者同时保留原有 BF16 路径。dense scales 不乘专家 INT4 的系数。
+- Day-0 `kimi31_topk.py` 在原生 DSA 枚举实例上接入 LightOp paged/ragged fused top-k；不能仅依靠未进入 Day-0 的通用 current_dsa 注册链。
+- LightOp MoE align 为显式 opt-in，按真实 GPU/Graph 验证的 expert/block/lane 合同分发，未覆盖形状保留原有效基线；AITER/BoltOPs 实际消费者另行接入。
+- 通信复用已有 AITER 实现，补齐 Day-0 注册及目标 upstream 下捕获配置读取。跨节点 attention TP 的 IPC 支持与实际回退必须由运行日志确认。
+
+### 适用边界与回退
+
+`HCU_KIMI31_NATIVE_DENSE_INT8=0` 保留默认 BF16 载入；融合开关关闭时调用当前 original wrapper。MLA post 原版 kernel 仅支持 plain 576 cache，目标 DSA structured/scaled cache 不兼容，未强制套用，保留原生 cache writer。输出精度或状态错误不通过异常后重放其他 kernel 掩盖。
+
+### 验证状态
+
+CPU 接口合同、loader 映射与集成分发检查已执行；LightOp align 小型 HCU eager/Graph 探针已执行。模型精度、128k C4/8/16 性能及真实命中仍在执行，不能将上述检查视为端到端提速结论。原始证据保存在本轮私有任务目录，完成后补充实际结果。
+
+2026-11-26 新四实例复验：Graph 捕获暴露 ReduceScatter 的输入/输出共享 storage；AITER 要求 disjoint。Day-0 窄 Hook 在共享 storage 时保留原通信路径，AllGather 同样守卫。新增实际回退调用合同测试通过；模型请求与性能复验尚在执行。
+
+新 kimi16 四实例复验记录：Day-0 AllGather 需接受 upstream 的 rank-major 输出视图，新增连续、dtype/device、元素数守卫，并以 flattened live views 调用 vendor。小型跨节点8rank Fabric AG eager及3次变化输入Graph replay逐位通过。候选normal模式3个真实请求返回巴黎、391、ZEPHYR-7741，均正常stop；属于有限语义验证，不代表真实128k长文质量。实际日志已确认SiTU INT8、latent RMS INT8、attention residual、DSA fused top-k及部分MoE alignment命中；MLA front因stream/资格条件跳过，post因DSA cache布局不兼容跳过。128k输入/128输出、C4/8/16 fake-prefill性能正在对比，不将synthetic KV续写当作语义精度证据。
+
+新四实例本轮限定性能对比完成：TP16/attentionDP2/EP2/ETP8，131072输入/128输出，C4/8/16各一次，fake-prefill synthetic KV，未模拟接受率。输出吞吐基线41.28/79.85/73.39 tok/s，候选45.48/74.78/119.70 tok/s，对应+10.2%/-6.3%/+63.1%；56个性能请求审计失败0。TPOT55.68/64.63/84.14→61.50/75.91/84.25 ms，未改善；接受长度2.59/2.32/2.77→2.22/2.00/2.30，synthetic续写不稳定，不能将差异全部归因于算子，亦不构成稳定收益证明。normal模式3个简单真实请求正确且正常stop，未验证真实128k长文质量。候选服务保留；upstream工作树保持未修改，运行时清单无漂移。MLA front/post当前配置未命中。私有运行记录、原始响应与Excel由本轮任务目录保留，不纳入共享仓库。

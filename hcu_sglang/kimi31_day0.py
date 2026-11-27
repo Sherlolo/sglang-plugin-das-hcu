@@ -49,7 +49,7 @@ def _warm_blas_before_load(self):
 
 def register_hooks():
     import os
-    os.environ["SGLANG_W4A8_TPMOE_BACKEND"] = "aiter"
+    os.environ.setdefault("SGLANG_W4A8_TPMOE_BACKEND", "aiter")
     from hcu_sglang.kimi31_graph_compat import register_hooks as register_graph_compat
     register_graph_compat()
     HookRegistry.register(
@@ -82,6 +82,21 @@ def register_hooks():
         register_ep()
         from hcu_sglang import deepep_graph
         deepep_graph.register_hooks()
+    elif os.environ.get("HCU_KIMI31_ETP") == "1":
+        from hcu_sglang.kimi31_ep_moe import register_etp_hooks
+        register_etp_hooks()
+
+    from hcu_sglang import kimi31_communication
+    kimi31_communication.register_hooks()
+
+    from hcu_sglang import kimi31_moe_align
+    kimi31_moe_align.register_hooks()
+
+    from hcu_sglang import kimi31_topk
+    kimi31_topk.register_hooks()
+
+    from hcu_sglang import kimi31_fusions
+    kimi31_fusions.register_hooks()
 
     from hcu_sglang import kimi31_shared_tp
     kimi31_shared_tp.register_hooks()

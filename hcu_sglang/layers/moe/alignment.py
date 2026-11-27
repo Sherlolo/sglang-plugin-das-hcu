@@ -285,7 +285,10 @@ def moe_align_block_size(
             topk_ids,
         )
         # LightOp's count/sort scratch overflows for batched decode shapes.
-        _hcu_moe_align_block_size_triton(
+        from hcu_sglang.kimi31_moe_align import align_hcu_tokens
+
+        align_hcu_tokens(
+            _hcu_moe_align_block_size_triton,
             hcu_topk_ids,
             num_experts + 1,
             block_size,
@@ -453,4 +456,7 @@ def around_align(original, *args, **kwargs):
 
 def register_hooks():
     from sglang.srt.plugins.hook_registry import HookRegistry, HookType
+    from hcu_sglang import kimi31_moe_align
+
+    kimi31_moe_align.register_hooks()
     HookRegistry.register("sglang.srt.layers.moe.moe_runner.triton_utils.moe_align_block_size.moe_align_block_size", around_align, HookType.AROUND)

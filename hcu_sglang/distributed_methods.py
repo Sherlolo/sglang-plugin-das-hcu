@@ -112,7 +112,7 @@ def _maybe_aiter_reduce_scatter(
         if torch.cuda.is_current_stream_capturing():
             if (
                 envs.SGLANG_MEMORY_SAVER_CUDA_GRAPH.get()
-                or _AITER_CAPTURE_COPY_IN
+                or envs.SGLANG_AITER_CAPTURE_COPY_IN.get()
                 or not getattr(ca_comm, "enable_register_for_capturing", True)
             ):
                 ca_comm.reduce_scatter(input, output, registered=False)
@@ -205,7 +205,7 @@ def _all_gather_into_tensor(self, output: torch.Tensor, input: torch.Tensor):
             if torch.cuda.is_current_stream_capturing():
                 if (
                     envs.SGLANG_MEMORY_SAVER_CUDA_GRAPH.get()
-                    or _AITER_CAPTURE_COPY_IN
+                    or envs.SGLANG_AITER_CAPTURE_COPY_IN.get()
                     or _is_hcu
                     or not getattr(ca_comm, "enable_register_for_capturing", True)
                 ):

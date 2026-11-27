@@ -212,7 +212,7 @@ def dispatch_custom_allreduce(
         return _native()
 
     if backend == "aiter":
-        if not S._is_hip:
+        if not (S._is_hip or is_hcu()):
             raise RuntimeError(
                 "custom_all_reduce_backend=aiter requires HIP/ROCm; "
                 "current platform does not support aiter CA."
