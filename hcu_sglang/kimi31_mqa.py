@@ -43,12 +43,13 @@ def around_verify_raw_topk(original, self, score, lengths, topk, row_starts=None
     if not _verify_paged_topk.get() or not self.is_torch() or row_starts is not None:
         return original(self, score, lengths, topk, row_starts=row_starts)
     rows, width = score.shape
+    max_rows = 128 if os.environ.get("HCU_KIMI31_VERIFY_LIGHTOP_TOPK_LARGE") == "1" else 64
     selected = (
         topk == 2048
         and score.dtype == torch.float32
         and score.is_contiguous()
         and lengths.numel() == rows
-        and 8 <= rows <= 64
+        and 8 <= rows <= max_rows
         and 131072 <= width <= 135168
     )
     layout = (rows, width, score.stride(), selected)

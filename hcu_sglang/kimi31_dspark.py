@@ -93,6 +93,13 @@ def register_hooks():
         backend = "sglang.srt.model_executor.runner_backend.full_cuda_graph_backend.FullCudaGraphBackend"
         HookRegistry.register(f"{backend}.capture_one", kimi31_router_graph_diag.capture_one, HookType.AROUND)
         HookRegistry.register(f"{backend}.replay", kimi31_router_graph_diag.replay, HookType.AROUND)
+    if (
+        os.environ.get("HCU_KIMI31_SHARED_AITER_AG") == "1"
+        or os.environ.get("HCU_KIMI31_SHARED_AITER_RS") == "1"
+    ):
+        from hcu_sglang import kimi31_shared_gather
+        kimi31_shared_gather.register_hooks()
+
     if os.environ.get("HCU_KIMI31_ROUTER_LIGHTOP") == "1":
         HookRegistry.register(
             "sglang.srt.models.kimi_k3.KimiK31ForConditionalGeneration.forward",
